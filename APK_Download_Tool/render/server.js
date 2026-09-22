@@ -7,12 +7,15 @@
  *   GET  /api/resolve?input=    Play URL / market:// / package  ->  JSON result or structured error
  *   GET  /api/download?u=&name= Streams the APK from the mirror through this server (no size limit besides MAX_PROXY_BYTES)
  *   GET  /api/diagnose?pkg=     Raw HTTP status of each mirror endpoint from THIS server's IP (protect with DIAG_TOKEN)
+ *   GET  /api/notifications     In-app notification feed: recent resolutions, failures and mirror-health alerts
  *   GET  /healthz               Liveness
+ *
+ * Notifications live in the tool's own UI (bell icon + Activity panel), fed by /api/notifications.
+ * There is deliberately no Slack / Teams / e-mail integration.
  *
  * Env (all optional): PORT, PROVIDER_ORDER, PLAY_DEFAULT_REGION, PLAY_REGIONS, ALLOW_UNLISTED_APPS,
  *   RATE_LIMIT_MAX (30) / RATE_LIMIT_WINDOW_SEC (600), DIAG_TOKEN,
- *   NOTIFY_WEBHOOK_URL (Slack / Teams / any JSON webhook), NOTIFY_ON_FAILURE (true), NOTIFY_THROTTLE_SEC (300),
- *   SMTP_URL (smtps://user:pass@smtp.gmail.com) + NOTIFY_EMAIL_TO / NOTIFY_EMAIL_FROM  (needs `nodemailer`)
+ *   NOTIFY_MAX_EVENTS (200), NOTIFY_ALERT_WINDOW_SEC (600), NOTIFY_ALERT_THRESHOLD (3)
  */
 const express = require('express');
 const path = require('path');
@@ -33,42 +36,62 @@ function log(level, msg, data) {
 }
 
 // ----------------------------------------------------------------------------
-// Notifications: webhook (Slack/Teams/generic) and/or SMTP. Throttled per package.
+// In-app notifications: an in-memory ring buffer of events the UI polls.
+//   kinds: success | failure | error | alert
+//   An `alert` is raised when a mirror is BLOCKED (403/429/bot challenge) NOTIFY_ALERT_THRESHOLD times within
+//   NOTIFY_ALERT_WINDOW_SEC, or when every provider misses for an app Play does list (NO_PROVIDER).
+//   Events are anonymous (no client IPs, no user ids) so the feed can be shown to everyone using the tool.
 // ----------------------------------------------------------------------------
 const NOTIFY = {
-  onFailure: (process.env.NOTIFY_ON_FAILURE || 'true') === 'true',
-  webhook: process.env.NOTIFY_WEBHOOK_URL || '',
-  smtpUrl: process.env.SMTP_URL || '',
-  to: process.env.NOTIFY_EMAIL_TO || '',
-  from: process.env.NOTIFY_EMAIL_FROM || process.env.NOTIFY_EMAIL_TO || '',
-  throttleSec: Number(process.env.NOTIFY_THROTTLE_SEC || 300)
+  maxEvents: Number(process.env.NOTIFY_MAX_EVENTS || 200),
+  alertWindowSec: Number(process.env.NOTIFY_ALERT_WINDOW_SEC || 600),
+  alertThreshold: Number(process.env.NOTIFY_ALERT_THRESHOLD || 3)
 };
-const notifyLast = new Map();
-let mailer = null;
-if (NOTIFY.smtpUrl && NOTIFY.to) {
-  try { mailer = require('nodemailer').createTransport(NOTIFY.smtpUrl); } catch (e) { log('warn', 'nodemailer not installed; e-mail notifications disabled', { message: e.message }); }
+const events = [];                 // newest last
+let eventSeq = 0;
+const blockedHits = new Map();     // provider -> [timestamps]
+const alertLast = new Map();       // alert key -> last raised ms
+
+function pushEvent(kind, title, detail, extra) {
+  const ev = Object.assign({ id: ++eventSeq, t: new Date().toISOString(), kind, title, detail: detail || '' }, extra || {});
+  events.push(ev);
+  if (events.length > NOTIFY.maxEvents) events.splice(0, events.length - NOTIFY.maxEvents);
+  return ev;
 }
+function raiseAlert(key, title, detail, extra) {
+  const last = alertLast.get(key) || 0;
+  if (Date.now() - last < NOTIFY.alertWindowSec * 1000) return null;     // one alert per key per window
+  alertLast.set(key, Date.now());
+  log('warn', 'alert', { key, title, detail });
+  return pushEvent('alert', title, detail, Object.assign({ key }, extra || {}));
+}
+function noteProviderBlocked(provider, message) {
+  const now = Date.now();
+  const arr = (blockedHits.get(provider) || []).filter(t => now - t < NOTIFY.alertWindowSec * 1000);
+  arr.push(now); blockedHits.set(provider, arr);
+  if (arr.length >= NOTIFY.alertThreshold) {
+    raiseAlert('blocked:' + provider, `${provider} is blocking this server`, `${arr.length} blocked responses in the last ${Math.round(NOTIFY.alertWindowSec / 60)} min (${message}). Other mirrors are still tried; consider reordering PROVIDER_ORDER.`, { provider });
+  }
+}
+/** Called by the resolver whenever every provider fails or an internal error occurs. */
 async function notifyFailure(pkg, appMeta, err, attempts) {
-  if (!NOTIFY.onFailure) return;
-  const key = String(pkg || 'unknown');
-  const last = notifyLast.get(key) || 0;
-  if (Date.now() - last < NOTIFY.throttleSec * 1000) return;
-  notifyLast.set(key, Date.now());
-  const lines = [
-    `${CONFIG.APP_NAME} — resolution FAILED`,
-    `Package : ${pkg || '(unparsed)'}`,
-    `App     : ${appMeta ? `${appMeta.title} by ${appMeta.developer} [Play region: ${appMeta.region || 'none'}]` : '(unknown)'}`,
-    `Code    : ${err.code || ERR.INTERNAL}`,
-    `Message : ${err.message}`,
-    `When    : ${new Date().toISOString()}`,
-    'Provider attempts:',
-    ...(attempts || []).map(a => `  - ${a.provider}: ${a.ok ? 'OK' : `${a.code} — ${a.message || ''}`}`)
-  ];
-  const text = lines.join('\n');
-  const jobs = [];
-  if (NOTIFY.webhook) jobs.push(fetch(NOTIFY.webhook, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text }) }).catch(e => log('warn', 'webhook notify failed', { message: e.message })));
-  if (mailer) jobs.push(mailer.sendMail({ from: NOTIFY.from, to: NOTIFY.to, subject: `[${CONFIG.APP_NAME}] FAILED: ${pkg || 'unknown package'}`, text }).catch(e => log('warn', 'mail notify failed', { message: e.message })));
-  await Promise.all(jobs);
+  const title = appMeta && appMeta.title && appMeta.title !== pkg ? `${appMeta.title} (${pkg})` : String(pkg || 'unknown package');
+  const kind = err.code === ERR.NO_PROVIDER || err.code === ERR.APP_NOT_FOUND ? 'failure' : 'error';
+  pushEvent(kind, `${kind === 'error' ? 'Error' : 'No APK found'}: ${title}`, err.message, {
+    code: err.code, package: pkg || null, region: appMeta ? appMeta.region : null,
+    attempts: (attempts || []).map(a => ({ provider: a.provider, ok: !!a.ok, code: a.code || null }))
+  });
+  if (err.code === ERR.NO_PROVIDER && appMeta && appMeta.region) {
+    raiseAlert('noprovider:' + pkg, `Geo-restricted or unmirrored app: ${appMeta.title}`, `Google Play lists it in the ${appMeta.region} store but no mirror carries the file. Users get browser-side links instead.`, { package: pkg, region: appMeta.region });
+  }
+  for (const a of attempts || []) if (a.code === ERR.PROVIDER_BLOCKED) noteProviderBlocked(a.provider, a.message || '');
+}
+function notifySuccess(result) {
+  const d = result.download, a = result.app;
+  pushEvent('success', `${a.title} → ${d.provider}${d.kind === 'XAPK' ? ' (XAPK)' : ''}`, `${d.version || 'latest'} · ${d.sizeHuman}${a.geoRestricted ? ` · Play ${a.region} store` : ''}${result.cached ? ' · cached' : ''}`, {
+    package: result.package, provider: d.provider, region: a.region, version: d.version || null, sizeBytes: d.sizeBytes || null
+  });
+  for (const at of result.attempts || []) if (at.code === ERR.PROVIDER_BLOCKED) noteProviderBlocked(at.provider, at.message || '');
 }
 
 // ----------------------------------------------------------------------------
@@ -101,6 +124,7 @@ app.get('/api/resolve', rateLimit, async (req, res) => {
   const input = String(req.query.input || req.query.url || req.query.id || '');
   const started = Date.now();
   const result = await resolveApk(input, { log, notifyFailure });
+  if (result.ok && !result.cached) notifySuccess(result);
   log(result.ok ? 'info' : 'warn', 'resolve', { input: input.slice(0, 200), ok: result.ok, code: result.ok ? undefined : result.error.code, provider: result.ok ? result.download.provider : undefined, region: result.ok ? result.app.region : undefined, ms: Date.now() - started, ip: req.ip });
   res.status(result.ok ? 200 : httpStatusFor(result.error.code)).json(result);
 });
@@ -164,6 +188,27 @@ app.get('/api/download', rateLimit, async (req, res) => {
   req.on('close', () => body.destroy());
   body.on('end', () => log('info', 'proxy done', { u: target.hostname, bytes: sent, ip: req.ip }));
   body.pipe(res);
+});
+
+/** Notification feed for the UI. ?since=<id> returns only newer events; ?limit=N caps the list (default 50). */
+app.get('/api/notifications', (req, res) => {
+  const since = Number(req.query.since || 0), limit = Math.min(Number(req.query.limit || 50), NOTIFY.maxEvents);
+  const list = events.filter(e => e.id > since).slice(-limit).reverse();       // newest first
+  const windowMs = NOTIFY.alertWindowSec * 1000, now = Date.now();
+  const recent = events.filter(e => now - Date.parse(e.t) < windowMs);
+  res.setHeader('Cache-Control', 'no-store');
+  res.json({
+    ok: true, latestId: eventSeq, serverTime: new Date().toISOString(),
+    summary: {
+      windowMin: Math.round(windowMs / 60000),
+      success: recent.filter(e => e.kind === 'success').length,
+      failure: recent.filter(e => e.kind === 'failure').length,
+      error: recent.filter(e => e.kind === 'error').length,
+      alerts: recent.filter(e => e.kind === 'alert').length,
+      blockedProviders: [...blockedHits.entries()].filter(([, ts]) => ts.some(t => now - t < windowMs)).map(([p]) => p)
+    },
+    events: list
+  });
 });
 
 app.get('/api/diagnose', rateLimit, async (req, res) => {
