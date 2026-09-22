@@ -31,7 +31,7 @@ const CFG = {
   apkEditor: process.env.APKEDITOR_JAR || path.join(JARS, 'APKEditor.jar'),
   signer: process.env.APKSIGNER_JAR || path.join(JARS, 'uber-apk-signer.jar'),
   xmx: process.env.CONVERT_JAVA_XMX || '400m',     // APKEditor heap; free Render instance = 512 MB, node itself needs ~70 MB
-  signerXmx: process.env.CONVERT_SIGNER_XMX || '256m',
+  signerXmx: process.env.CONVERT_SIGNER_XMX || '192m',   // apksig digests the file in chunks; heap stays small
   maxBytes: Number(process.env.CONVERT_MAX_BYTES || 700 * 1024 * 1024),
   ttlSec: Number(process.env.CONVERT_TTL_SEC || 1800),
   workDir: process.env.CONVERT_DIR || path.join(os.tmpdir(), 'apk-convert'),
@@ -155,6 +155,8 @@ async function run(j) {
       const lm = await lightMerge(basePath, parts.filter(p => p !== basePath), merged);
       mode = 'light'; j.lightMerge = lm;
       for (const p of parts) { try { fs.unlinkSync(p); } catch { /* ignore */ } }
+      try { fs.unlinkSync(src); } catch { /* ignore */ }           // free disk/page cache before the JVM starts
+      if (global.gc) global.gc();
     }
     j.step = 'Signing (v1+v2+v3) and zipaligning'; j.progress = 0.85;
     await runJava(j, ['-jar', CFG.signer, '-a', merged, '--allowResign', '--overwrite'], 'uber-apk-signer', CFG.signerXmx);
