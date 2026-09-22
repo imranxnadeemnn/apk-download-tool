@@ -29,7 +29,7 @@ const CFG = {
   javaBin: process.env.JAVA_BIN || (fs.existsSync(path.join(ROOT, '.jre', 'bin', 'java')) ? path.join(ROOT, '.jre', 'bin', 'java') : 'java'),
   apkEditor: process.env.APKEDITOR_JAR || path.join(JARS, 'APKEditor.jar'),
   signer: process.env.APKSIGNER_JAR || path.join(JARS, 'uber-apk-signer.jar'),
-  xmx: process.env.CONVERT_JAVA_XMX || '320m',
+  xmx: process.env.CONVERT_JAVA_XMX || '400m',     // free Render instance = 512 MB; node itself needs ~70 MB
   maxBytes: Number(process.env.CONVERT_MAX_BYTES || 700 * 1024 * 1024),
   ttlSec: Number(process.env.CONVERT_TTL_SEC || 1800),
   workDir: process.env.CONVERT_DIR || path.join(os.tmpdir(), 'apk-convert'),
@@ -130,7 +130,7 @@ async function run(j) {
     if (!available()) throw fail(j, 'Conversion tools (Java / APKEditor) are not installed on this server.');
     j.step = `Merging ${apks.length} split APKs into one`; j.progress = 0.6;
     const merged = path.join(j.dir, 'merged.apk');
-    await runJava(j, ['-jar', CFG.apkEditor, 'm', '-i', src, '-o', merged, '-f', '-clean-meta'], 'APKEditor merge');
+    await runJava(j, ['-jar', CFG.apkEditor, 'm', '-i', src, '-o', merged, '-f', '-clean-meta', '-extractNativeLibs', 'true'], 'APKEditor merge');
     if (!fs.existsSync(merged)) throw fail(j, 'APKEditor produced no output.');
     j.step = 'Signing (v1+v2+v3) and zipaligning'; j.progress = 0.85;
     await runJava(j, ['-jar', CFG.signer, '-a', merged, '--allowResign', '--overwrite'], 'uber-apk-signer');
@@ -150,7 +150,7 @@ function fail(j, msg) { j.status = 'error'; j.error = msg; j.step = 'Failed'; j.
 
 function runJava(j, args, label) {
   return new Promise((res, rej) => {
-    const p = spawn(CFG.javaBin, [`-Xmx${CFG.xmx}`, '-Djava.awt.headless=true', ...args], { cwd: j.dir, env: { ...process.env, JAVA_TOOL_OPTIONS: '' } });
+    const p = spawn(CFG.javaBin, [`-Xmx${CFG.xmx}`, '-Xss512k', '-XX:+UseSerialGC', '-XX:MaxMetaspaceSize=64m', '-XX:TieredStopAtLevel=1', '-Djava.awt.headless=true', ...args], { cwd: j.dir, env: { ...process.env, JAVA_TOOL_OPTIONS: '' } });
     let err = '', out = '';
     const t = setTimeout(() => { p.kill('SIGKILL'); rej(fail(j, `${label} timed out.`)); }, CFG.stepTimeoutMs);
     p.stdout.on('data', d => { out += d; if (out.length > 20000) out = out.slice(-10000); });
