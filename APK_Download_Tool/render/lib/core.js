@@ -215,8 +215,39 @@ async function fetchPlayMetadataAnyRegion(pkg, hints) {
 // Providers
 // ----------------------------------------------------------------------------
 const PROVIDERS = {
-  /** APKPure: redirect endpoint -> CDN file. Tries APK then XAPK. */
+  /**
+   * APKPure — two routes:
+   *  (a) the APKPure Android app's own API (api.pureapk.com). Not behind the Cloudflare JS challenge,
+   *      because a native app cannot solve one. Same approach as EFF's `apkeep`. Response is a protobuf
+   *      blob; the CDN URL follows an "APKJ"/"XAPKJ" marker.
+   *  (b) the web redirect endpoint d.apkpure.com (Cloudflare-fronted; often 403 for datacenter IPs).
+   */
   async apkpure(pkg, app) {
+    // (a) app API
+    try {
+      const r = await httpFetch(`https://api.pureapk.com/m/v3/cms/app_version?hl=en-US&package_name=${encodeURIComponent(pkg)}`, {
+        headers: { 'x-cv': '3172501', 'x-sv': '29', 'x-abis': 'arm64-v8a,armeabi-v7a,armeabi,x86,x86_64', 'x-gp': '1', 'User-Agent': 'APKPure/3.17.25 (Aegon)', Accept: '*/*' }
+      });
+      if (r.status === 200) {
+        const body = Buffer.from(await r.arrayBuffer()).toString('latin1');
+        const m = body.match(/(X?APKJ)..(https?:\/\/[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b[-a-zA-Z0-9()@:%_+.~#?&/=]*)/);
+        if (m) {
+          const kind = m[1] === 'XAPKJ' ? 'XAPK' : 'APK', cdnUrl = m[2];
+          const vm = body.match(/(\d+\.\d+(?:\.\d+){0,3})/);     // first version-looking token = latest
+          const probe = await probeFile(cdnUrl);
+          if (probe.ok) {
+            return { provider: 'APKPure', route: 'app-api', url: cdnUrl, kind, fileName: probe.fileName || `${safeBase(app.title)}_${pkg}.${kind.toLowerCase()}`, sizeBytes: probe.sizeBytes, contentType: probe.contentType, version: probe.version || (vm ? vm[1] : 'latest'),
+              notes: kind === 'XAPK' ? 'XAPK bundle — install with the APKPure app / SAI, or unzip to get base APK + splits/OBB.' : '' };
+          }
+        } else if (/"package_name"|not found|no data/i.test(body) || body.length < 200) {
+          throw new ApkToolError(ERR.PROVIDER_MISS, 'APKPure app API has no build for this package.');
+        }
+      } else if ([403, 429, 503].includes(r.status)) {
+        r.body?.cancel?.();
+      } else { r.body?.cancel?.(); }
+    } catch (e) { if (e.code === ERR.PROVIDER_MISS) throw e; /* network/blocked: fall through to route (b) */ }
+
+    // (b) web redirect
     let lastCode = null;
     for (const kind of ['APK', 'XAPK']) {
       const url = `https://d.apkpure.com/b/${kind}/${encodeURIComponent(pkg)}?version=latest`;
@@ -378,6 +409,7 @@ async function diagnoseProviders(pkg) {
     ['Play IN', `https://play.google.com/store/apps/details?id=${pkg}&hl=en&gl=IN`, {}],
     ['Play MX', `https://play.google.com/store/apps/details?id=${pkg}&hl=es&gl=MX`, {}],
     ['Aptoide', `https://ws75.aptoide.com/api/7/listAppVersions?package_name=${pkg}&limit=3`, {}],
+    ['APKPure app API', `https://api.pureapk.com/m/v3/cms/app_version?hl=en-US&package_name=${pkg}`, { headers: { 'x-cv': '3172501', 'x-sv': '29', 'x-abis': 'arm64-v8a,armeabi-v7a,armeabi,x86,x86_64', 'x-gp': '1', 'User-Agent': 'APKPure/3.17.25 (Aegon)' } }],
     ['APKPure d.', `https://d.apkpure.com/b/APK/${pkg}?version=latest`, { redirect: 'manual', headers: { Referer: 'https://apkpure.com/', 'User-Agent': CONFIG.DESKTOP_USER_AGENT } }],
     ['APKCombo', `https://apkcombo.com/genericApp/${pkg}/download/apk`, { headers: { Referer: 'https://apkcombo.com/', 'User-Agent': CONFIG.DESKTOP_USER_AGENT } }],
     ['F-Droid', `https://f-droid.org/api/v1/packages/${pkg}`, {}]
@@ -386,8 +418,9 @@ async function diagnoseProviders(pkg) {
   for (const [name, url, opts] of probes) {
     try {
       const r = await httpFetch(url, opts);
-      const body = (await r.text()).slice(0, 160).replace(/\s+/g, ' ');
-      out.push({ name, status: r.status, contentType: r.headers.get('content-type'), location: r.headers.get('location'), body });
+      const raw = Buffer.from(await r.arrayBuffer()).toString('latin1');
+      const apk = raw.match(/(X?APKJ)..(https?:\/\/[^\s"'\x00-\x1f]{10,200})/);
+      out.push({ name, status: r.status, contentType: r.headers.get('content-type'), location: r.headers.get('location'), bytes: raw.length, apkMarker: apk ? { kind: apk[1], url: apk[2].slice(0, 120) } : undefined, body: raw.slice(0, 160).replace(/[^\x20-\x7e]/g, '.') });
     } catch (e) { out.push({ name, error: e.message }); }
   }
   return out;
