@@ -26,6 +26,10 @@ services:
         value: "3"
       - key: NOTIFY_ALERT_WINDOW_SEC
         value: "600"
-      # XAPK -> single APK conversion (Java heap for APKEditor/apksigner; free instance has 512 MB)
+      # XAPK -> single APK conversion (free instance: 512 MB RAM, 0.1 CPU)
       - key: CONVERT_JAVA_XMX
-        value: 320m
+        value: 400m
+      - key: CONVERT_FULL_MERGE_MAX_BYTES
+        value: "62914560"
+      - key: CONVERT_MERGE_TIMEOUT_MS
+        value: "150000"
