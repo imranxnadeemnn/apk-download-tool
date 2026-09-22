@@ -101,6 +101,19 @@
     .notif-empty { color: var(--muted); font-size: 13px; padding: 12px 4px; }
     .notif-foot { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
 
+    /* XAPK -> APK conversion box */
+    .convert { margin: 0 0 14px; padding: 12px 14px; border-radius: 10px; background: rgba(47,111,237,.07); border: 1px solid rgba(47,111,237,.3); }
+    .cv-head { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; }
+    .cv-title { font-weight: 700; font-size: 14px; }
+    .cv-sub { font-size: 12.5px; color: var(--muted); margin-top: 2px; }
+    .cv-progress { margin-top: 10px; }
+    .bar { height: 8px; border-radius: 999px; background: var(--line); overflow: hidden; }
+    .bar div { height: 100%; width: 0; background: var(--accent); transition: width .4s; }
+    .cv-step { font-size: 12.5px; color: var(--muted); margin-top: 6px; }
+    .cv-done { margin-top: 10px; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+    .cv-note { flex-basis: 100%; font-size: 12.5px; color: var(--muted); }
+    .cv-err { margin-top: 10px; font-size: 13px; color: var(--err); }
+
     /* browser-side fallback links */
     .fallback { display: none; margin-top: 14px; padding-top: 12px; border-top: 1px dashed rgba(209,67,67,.35); }
     .fallback.show { display: block; }
@@ -203,6 +216,25 @@
         <div><b>Type</b><span id="kind"></span></div>
         <div><b>Version</b><span id="version"></span></div>
         <div><b>Size</b><span id="size"></span></div>
+      </div>
+      <div id="convertBox" class="convert" hidden>
+        <div class="cv-head">
+          <div>
+            <div class="cv-title">This app ships as an XAPK bundle</div>
+            <div class="cv-sub">Android cannot install an XAPK directly. The server can merge the bundle into one <code>.apk</code> you can download and install on the device.</div>
+          </div>
+          <button id="convertGo" type="button">Get installable APK</button>
+        </div>
+        <div id="convertProgress" class="cv-progress" hidden>
+          <div class="bar"><div id="convertBar"></div></div>
+          <div class="cv-step" id="convertStep">Starting…</div>
+        </div>
+        <div id="convertDone" class="cv-done" hidden>
+          <a id="convertDl" class="btn" href="#">⬇ Download APK</a>
+          <button id="convertCopy" class="secondary" type="button">Copy link</button>
+          <div class="cv-note" id="convertNote"></div>
+        </div>
+        <div id="convertErr" class="cv-err" hidden></div>
       </div>
       <div class="actions">
         <a id="dl" class="btn" href="#" target="_blank" rel="noopener">⬇ Download APK</a>
@@ -344,6 +376,9 @@
     $('size').textContent = d.sizeHuman || 'unknown';
     $('dl').href = d.url;
     $('dl').setAttribute('download', d.fileName || '');
+    $('dl').textContent = d.kind === 'XAPK' ? '⬇ Download XAPK bundle' : '⬇ Download APK';
+    $('dlProxy').textContent = d.kind === 'XAPK' ? '⬇ Download XAPK via server' : '⬇ Download via server';
+    setupConvert(d.kind === 'XAPK' ? d.convertUrl : null, a.title);
     $('notes').textContent = [d.notes, r.cached ? 'Served from cache.' : ''].filter(Boolean).join(' ');
     $('dlProxy').href = d.proxyUrl || '#';
     $('dlProxy').style.display = d.proxyUrl ? '' : 'none';
@@ -352,6 +387,72 @@
     result.classList.add('show');
     toast('ok', 'APK found', a.title + ' via ' + d.provider + (d.sizeHuman ? ' · ' + d.sizeHuman : ''));
   }
+
+  // ---------- XAPK -> single APK conversion ----------
+  var cv = { url: null, jobId: null, timer: null, title: '' };
+  function setupConvert(convertUrl, title) {
+    if (cv.timer) { clearTimeout(cv.timer); cv.timer = null; }
+    cv.url = convertUrl; cv.jobId = null; cv.title = title || '';
+    var box = $('convertBox');
+    $('convertProgress').hidden = true; $('convertDone').hidden = true; $('convertErr').hidden = true;
+    $('convertGo').disabled = false; $('convertGo').hidden = false; $('convertGo').textContent = 'Get installable APK';
+    box.hidden = !convertUrl;
+    // If a job for this bundle already finished on the server (same URL), show it straight away.
+    if (convertUrl) fetch(convertUrl + '&check=1', { headers: { 'Accept': 'application/json' } }).then(function (r) { return r.status === 200 ? r.json() : null; })
+      .then(function (j) { if (j && j.ok && j.job && j.job.status === 'done') { cv.jobId = j.job.id; renderJob(j.job); } })
+      .catch(function () {});
+  }
+  function convertStart() {
+    if (!cv.url) return;
+    $('convertGo').disabled = true; $('convertGo').textContent = 'Working…';
+    $('convertErr').hidden = true; $('convertProgress').hidden = false; $('convertBar').style.width = '2%'; $('convertStep').textContent = 'Starting…';
+    fetch(cv.url, { headers: { 'Accept': 'application/json' } })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j || !j.ok) { convertFail((j && j.error && (j.error.message + (j.error.hint ? ' ' + j.error.hint : ''))) || 'Could not start the conversion.'); return; }
+        cv.jobId = j.job.id; renderJob(j.job);
+      })
+      .catch(function (e) { convertFail('Could not reach the server: ' + (e && e.message || e)); });
+  }
+  function pollJob() {
+    if (!cv.jobId) return;
+    fetch('/api/convert/' + encodeURIComponent(cv.jobId), { headers: { 'Accept': 'application/json' } })
+      .then(function (r) { return r.json(); })
+      .then(function (j) { if (!j || !j.ok) { convertFail((j && j.error && j.error.message) || 'Job lost.'); return; } renderJob(j.job); })
+      .catch(function () { cv.timer = setTimeout(pollJob, 4000); });
+  }
+  function renderJob(job) {
+    if (cv.timer) { clearTimeout(cv.timer); cv.timer = null; }
+    if (job.status === 'done') {
+      $('convertProgress').hidden = true; $('convertGo').hidden = true; $('convertErr').hidden = true;
+      $('convertDone').hidden = false;
+      $('convertDl').href = job.downloadUrl; $('convertDl').setAttribute('download', job.fileName || 'app.apk');
+      $('convertDl').textContent = '⬇ Download APK' + (job.sizeHuman ? ' · ' + job.sizeHuman : '');
+      $('convertNote').textContent = (job.notes || '') + (job.expiresAt ? ' Link valid until ' + new Date(job.expiresAt).toLocaleTimeString() + '.' : '');
+      $('kind').innerHTML = 'APK <span class="badge">' + (job.resigned ? 'merged + re-signed' : 'extracted from bundle') + '</span>';
+      toast('ok', 'Installable APK ready', cv.title + (job.sizeHuman ? ' · ' + job.sizeHuman : ''));
+      setTimeout(pollNotif, 400);
+      return;
+    }
+    if (job.status === 'error') { convertFail(job.error || 'Conversion failed.'); setTimeout(pollNotif, 400); return; }
+    $('convertProgress').hidden = false; $('convertGo').disabled = true; $('convertGo').textContent = 'Working…';
+    var pct = Math.max(2, Math.round((job.progress || 0) * 100));
+    $('convertBar').style.width = pct + '%';
+    var extra = job.step && /Download/i.test(job.step) && job.downloadedBytes ? ' · ' + (job.downloadedBytes / 1048576).toFixed(0) + (job.sourceBytes ? ' / ' + (job.sourceBytes / 1048576).toFixed(0) : '') + ' MB' : '';
+    $('convertStep').textContent = (job.status === 'queued' ? 'Queued — ' : '') + (job.step || 'Working…') + extra;
+    cv.timer = setTimeout(pollJob, 2000);
+  }
+  function convertFail(msg) {
+    $('convertProgress').hidden = true; $('convertDone').hidden = true;
+    $('convertErr').hidden = false; $('convertErr').textContent = '✕ ' + msg + ' You can still download the XAPK bundle below and install it with the APKPure app or SAI.';
+    $('convertGo').disabled = false; $('convertGo').hidden = false; $('convertGo').textContent = 'Try again';
+    toast('err', 'Conversion failed', msg, 7000);
+  }
+  $('convertGo').addEventListener('click', convertStart);
+  $('convertCopy').addEventListener('click', function () {
+    var url = location.origin + $('convertDl').getAttribute('href');
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(function () { toast('ok', 'Link copied', 'Valid for about 30 minutes.'); });
+  });
 
   // ---------- main submit ----------
   form.addEventListener('submit', function (ev) {
