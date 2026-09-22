@@ -26,3 +26,6 @@ services:
         value: "3"
       - key: NOTIFY_ALERT_WINDOW_SEC
         value: "600"
+      # XAPK -> single APK conversion (Java heap for APKEditor/apksigner; free instance has 512 MB)
+      - key: CONVERT_JAVA_XMX
+        value: 320m
