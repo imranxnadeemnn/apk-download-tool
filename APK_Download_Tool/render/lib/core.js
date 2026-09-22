@@ -256,8 +256,8 @@ const PROVIDERS = {
         const body = Buffer.from(await r.arrayBuffer()).toString('latin1');
         const cands = apkpureCandidates(body, pkg);
         if (!cands.length) { if (/INVALID_COMMAND/.test(body) || body.length < 200) apiMiss = true; continue; }
-        // newest version code first
-        cands.sort((a, b) => (b.versionCode || 0) - (a.versionCode || 0));
+        // newest version code first; for the same build prefer a plain APK over an XAPK bundle
+        cands.sort((a, b) => ((b.versionCode || 0) - (a.versionCode || 0)) || (a.kind === 'APK' ? -1 : b.kind === 'APK' ? 1 : 0));
         for (const c of cands) {
           const probe = await probeFile(c.url);
           if (!probe.ok) continue;
@@ -388,18 +388,31 @@ async function resolveApk(input, { log = () => {}, notifyFailure = async () => {
 
     const attempts = [];
     let download = null;
+    let bundle = null;          // an XAPK we found but kept looking past, hoping for a plain APK
     for (const name of CONFIG.PROVIDER_ORDER) {
       const fn = PROVIDERS[name];
       if (!fn) { attempts.push({ provider: name, ok: false, code: 'UNKNOWN_PROVIDER' }); continue; }
       try {
-        download = await fn(pkg, app);
-        attempts.push({ provider: name, ok: true });
+        const found = await fn(pkg, app);
+        attempts.push({ provider: name, ok: true, kind: found.kind, versionCode: found.versionCode || null });
+        if (found.kind === 'XAPK') {
+          // Users want a single installable .apk. Remember the bundle and keep looking for an APK that is at
+          // least as new; an older APK from another mirror would be a downgrade, so the bundle wins then.
+          if (!bundle) bundle = found;
+          continue;
+        }
+        if (bundle && bundle.versionCode && found.versionCode && Number(found.versionCode) < Number(bundle.versionCode)) {
+          attempts[attempts.length - 1].skipped = `older than ${bundle.provider} bundle (${found.versionCode} < ${bundle.versionCode})`;
+          continue;
+        }
+        download = found;
         break;
       } catch (e) {
         attempts.push({ provider: name, ok: false, code: e.code || ERR.INTERNAL, message: e.message });
         log('warn', 'provider failed', { pkg, provider: name, code: e.code, message: e.message });
       }
     }
+    if (!download && bundle) download = bundle;
 
     if (!download) {
       const err = app.unlisted
@@ -412,6 +425,11 @@ async function resolveApk(input, { log = () => {}, notifyFailure = async () => {
     download.sizeHuman = humanSize(download.sizeBytes);
     // Server-side streaming proxy URL (lets the browser download through this server; hides mirror headers/tokens).
     download.proxyUrl = `/api/download?u=${encodeURIComponent(download.url)}&name=${encodeURIComponent(download.fileName || 'app.apk')}${download.headers ? '&ref=' + encodeURIComponent(download.headers.Referer || '') : ''}`;
+    if (download.kind === 'XAPK') {
+      // Server-side conversion job: XAPK bundle -> one installable .apk (see server.js /api/convert).
+      download.convertUrl = `/api/convert?u=${encodeURIComponent(download.url)}&name=${encodeURIComponent((download.fileName || pkg).replace(/\.xapk$/i, '') + '.apk')}&pkg=${encodeURIComponent(pkg)}${download.headers ? '&ref=' + encodeURIComponent(download.headers.Referer || '') : ''}`;
+      download.notes = 'This app ships as an XAPK bundle (base + split APKs). Use "Get installable APK" to have the server merge it into one .apk you can install directly on the device.';
+    }
     const payload = { ok: true, package: pkg, download, attempts };
     cachePut('apk:' + pkg, payload, CONFIG.RESULT_CACHE_SEC);
     return { ...payload, app, cached: false, elapsedMs: Date.now() - started };
