@@ -1,0 +1,19 @@
+{
+  "name": "apk-download-tool",
+  "version": "1.0.0",
+  "description": "Google Play URL -> APK download link (multi-region Play lookup, free mirror chain, streaming proxy)",
+  "main": "server.js",
+  "type": "commonjs",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js",
+    "test": "node test/core.test.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  },
+  "optionalDependencies": {
+    "nodemailer": "^6.9.16"
+  },
+  "license": "MIT"
+}

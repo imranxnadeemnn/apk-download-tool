@@ -1,0 +1,27 @@
+services:
+  - type: web
+    name: apk-download-tool
+    runtime: node
+    plan: free
+    region: singapore
+    buildCommand: npm install --omit=dev
+    startCommand: npm start
+    healthCheckPath: /healthz
+    autoDeploy: true
+    envVars:
+      - key: NODE_VERSION
+        value: "22"
+      - key: PLAY_DEFAULT_REGION
+        value: IN
+      - key: PROVIDER_ORDER
+        value: apkpure,aptoide,fdroid,apkcombo
+      - key: ALLOW_UNLISTED_APPS
+        value: "true"
+      - key: RATE_LIMIT_MAX
+        value: "60"
+      - key: DIAG_TOKEN
+        generateValue: true
+      # Optional notifications — set in the Render dashboard:
+      # - key: NOTIFY_WEBHOOK_URL   (Slack / Teams incoming webhook)
+      # - key: SMTP_URL             (smtps://user:app-password@smtp.gmail.com)
+      # - key: NOTIFY_EMAIL_TO

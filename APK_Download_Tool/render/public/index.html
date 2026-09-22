@@ -1,0 +1,373 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>APK Download Tool</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 viewBox=%270 0 32 32%27%3E%3Crect width=%2732%27 height=%2732%27 rx=%278%27 fill=%27%233ddc84%27/%3E%3Ctext x=%2716%27 y=%2722%27 font-size=%2718%27 text-anchor=%27middle%27 fill=%27white%27 font-family=%27sans-serif%27 font-weight=%27700%27%3EA%3C/text%3E%3C/svg%3E">
+  <style>
+    :root {
+      --bg: #f4f6fa; --card: #ffffff; --ink: #1c2430; --muted: #66707f; --line: #e1e6ee;
+      --accent: #2f6fed; --accent-ink: #ffffff; --ok: #1e9e5a; --warn: #c98a00; --err: #d14343;
+      --radius: 14px; --shadow: 0 8px 30px rgba(20, 30, 60, .08);
+    }
+    @media (prefers-color-scheme: dark) {
+      :root { --bg: #0f1420; --card: #171d2b; --ink: #e8ecf3; --muted: #97a1b3; --line: #273047; --shadow: 0 8px 30px rgba(0,0,0,.4); }
+    }
+    * { box-sizing: border-box; }
+    html, body { margin: 0; background: var(--bg); color: var(--ink); font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
+    .wrap { max-width: 720px; margin: 0 auto; padding: 32px 16px 64px; }
+    header { display: flex; align-items: center; gap: 12px; margin-bottom: 20px; }
+    header .logo { width: 40px; height: 40px; border-radius: 12px; background: linear-gradient(135deg, #3ddc84, #2f6fed); display: grid; place-items: center; color: #fff; font-weight: 700; }
+    header h1 { font-size: 20px; margin: 0; }
+    header p { margin: 0; color: var(--muted); font-size: 13px; }
+
+    .card { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 20px; }
+    label { display: block; font-size: 13px; color: var(--muted); margin-bottom: 6px; }
+    .row { display: flex; gap: 10px; }
+    input[type=text] { flex: 1; min-width: 0; padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: transparent; color: var(--ink); font-size: 15px; outline: none; }
+    input[type=text]:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(47,111,237,.15); }
+    input.invalid { border-color: var(--err); }
+    button { border: 0; border-radius: 10px; padding: 12px 18px; font-size: 15px; font-weight: 600; cursor: pointer; background: var(--accent); color: var(--accent-ink); white-space: nowrap; }
+    button:disabled { opacity: .55; cursor: not-allowed; }
+    button.secondary { background: transparent; color: var(--accent); border: 1px solid var(--line); }
+    .hint { font-size: 12.5px; color: var(--muted); margin-top: 8px; }
+    .hint.error { color: var(--err); }
+
+    /* status stepper */
+    .steps { display: none; margin-top: 18px; padding: 14px 16px; border-radius: 10px; background: rgba(47,111,237,.06); border: 1px dashed var(--line); }
+    .steps.show { display: block; }
+    .step { display: flex; align-items: center; gap: 10px; font-size: 13.5px; color: var(--muted); padding: 3px 0; }
+    .step .dot { width: 10px; height: 10px; border-radius: 50%; background: var(--line); flex: none; }
+    .step.active .dot { background: var(--accent); animation: pulse 1s infinite; }
+    .step.done .dot { background: var(--ok); }
+    .step.fail .dot { background: var(--err); }
+    .step.done, .step.active { color: var(--ink); }
+    @keyframes pulse { 0%,100% { transform: scale(1); opacity: 1 } 50% { transform: scale(1.5); opacity: .55 } }
+
+    /* result */
+    .result { display: none; margin-top: 18px; }
+    .result.show { display: block; }
+    .app { display: flex; gap: 14px; align-items: center; }
+    .app img { width: 64px; height: 64px; border-radius: 16px; background: var(--line); object-fit: cover; flex: none; }
+    .app .t { font-weight: 700; font-size: 17px; }
+    .app .d { color: var(--muted); font-size: 13px; }
+    .meta { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 10px; margin: 16px 0; }
+    .meta div { background: var(--bg); border-radius: 10px; padding: 10px 12px; font-size: 13px; }
+    .meta b { display: block; color: var(--muted); font-weight: 500; font-size: 11.5px; text-transform: uppercase; letter-spacing: .04em; }
+    .actions { display: flex; gap: 10px; flex-wrap: wrap; }
+    a.btn { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; border-radius: 10px; padding: 12px 18px; font-weight: 600; background: var(--ok); color: #fff; }
+    .note { font-size: 12.5px; color: var(--muted); margin-top: 12px; }
+    .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px; background: rgba(30,158,90,.12); color: var(--ok); font-weight: 600; }
+    .badge.warn { background: rgba(201,138,0,.14); color: var(--warn); }
+    details { margin-top: 14px; font-size: 12.5px; color: var(--muted); }
+    details pre { background: var(--bg); padding: 10px; border-radius: 8px; overflow: auto; font-size: 11.5px; }
+
+    /* error panel */
+    .errbox { display: none; margin-top: 18px; padding: 14px 16px; border-radius: 10px; background: rgba(209,67,67,.08); border: 1px solid rgba(209,67,67,.35); }
+    .errbox.show { display: block; }
+    .errbox .code { font-family: ui-monospace, Menlo, monospace; font-size: 11.5px; color: var(--err); }
+    .errbox .msg { font-weight: 600; margin: 4px 0; }
+    .errbox .hint { color: var(--ink); opacity: .85; margin: 0; }
+
+    /* browser-side fallback links */
+    .fallback { display: none; margin-top: 14px; padding-top: 12px; border-top: 1px dashed rgba(209,67,67,.35); }
+    .fallback.show { display: block; }
+    .fb-title { font-weight: 700; font-size: 14px; color: var(--ink); }
+    .fb-sub { font-size: 12.5px; color: var(--muted); margin: 2px 0 10px; }
+    .fb-links { display: flex; flex-direction: column; gap: 8px; }
+    .fb-links a { display: flex; align-items: center; justify-content: space-between; gap: 10px; text-decoration: none; padding: 10px 12px; border-radius: 10px; background: var(--card); border: 1px solid var(--line); color: var(--ink); font-size: 13.5px; }
+    .fb-links a:hover { border-color: var(--accent); }
+    .fb-links a small { color: var(--muted); font-size: 12px; }
+    .fb-links a .tag { font-size: 11px; font-weight: 600; padding: 2px 8px; border-radius: 999px; background: rgba(47,111,237,.12); color: var(--accent); white-space: nowrap; }
+    .fb-links a .tag.dl { background: rgba(30,158,90,.12); color: var(--ok); }
+
+    /* geo warning */
+    .warnbox { display: none; margin-top: 14px; padding: 10px 14px; border-radius: 10px; font-size: 13px; background: rgba(201,138,0,.10); border: 1px solid rgba(201,138,0,.35); color: var(--ink); }
+    .warnbox.show { display: block; }
+
+    /* toasts */
+    #toasts { position: fixed; right: 16px; bottom: 16px; display: flex; flex-direction: column; gap: 10px; z-index: 99; max-width: 92vw; }
+    .toast { min-width: 260px; max-width: 380px; padding: 12px 14px; border-radius: 10px; background: var(--card); border-left: 4px solid var(--accent); box-shadow: var(--shadow); font-size: 13.5px; animation: slide .25s ease-out; }
+    .toast.ok { border-left-color: var(--ok); } .toast.err { border-left-color: var(--err); } .toast.warn { border-left-color: var(--warn); }
+    .toast b { display: block; margin-bottom: 2px; }
+    @keyframes slide { from { transform: translateY(12px); opacity: 0 } to { transform: none; opacity: 1 } }
+
+    footer { margin-top: 24px; font-size: 12px; color: var(--muted); text-align: center; }
+    footer a { color: inherit; }
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <header>
+    <div class="logo">A</div>
+    <div>
+      <h1>APK Download Tool</h1>
+      <p>Paste a Google Play link → get the APK from a free public mirror.</p>
+    </div>
+  </header>
+
+  <div class="card">
+    <form id="form" autocomplete="off" novalidate>
+      <label for="url">Google Play Store URL (or package name)</label>
+      <div class="row">
+        <input id="url" type="text" placeholder="https://play.google.com/store/apps/details?id=com.whatsapp" spellcheck="false" required>
+        <button id="go" type="submit">Get APK</button>
+      </div>
+      <div id="inputHint" class="hint">Free apps only. Also accepts <code>market://details?id=…</code> or a bare package like <code>com.duolingo</code>.</div>
+    </form>
+
+    <div id="steps" class="steps">
+      <div class="step" data-step="parse"><span class="dot"></span><span>Reading link &amp; extracting package name</span></div>
+      <div class="step" data-step="play"><span class="dot"></span><span>Verifying app on Google Play</span></div>
+      <div class="step" data-step="mirror"><span class="dot"></span><span>Locating APK on free mirrors</span></div>
+      <div class="step" data-step="probe"><span class="dot"></span><span>Checking file size &amp; integrity</span></div>
+    </div>
+
+    <div id="errbox" class="errbox" role="alert">
+      <div class="code" id="errCode"></div>
+      <div class="msg" id="errMsg"></div>
+      <p class="hint" id="errHint"></p>
+      <div id="fallback" class="fallback">
+        <div class="fb-title">Try from your browser</div>
+        <div class="fb-sub">These mirrors block Google's servers but usually work from a normal browser. Verify the signature before installing.</div>
+        <div id="fbLinks" class="fb-links"></div>
+      </div>
+    </div>
+
+    <div id="result" class="result">
+      <div class="app">
+        <img id="icon" alt="" onerror="this.style.visibility='hidden'">
+        <div>
+          <div class="t" id="title"></div>
+          <div class="d" id="dev"></div>
+          <div class="d"><code id="pkg"></code> · <a id="playLink" href="#" target="_blank" rel="noopener">View on Google Play ↗</a></div>
+          <div class="d" id="regionLine"></div>
+        </div>
+      </div>
+      <div class="warnbox" id="geoWarn"></div>
+      <div class="meta">
+        <div><b>Source</b><span id="provider"></span></div>
+        <div><b>Type</b><span id="kind"></span></div>
+        <div><b>Version</b><span id="version"></span></div>
+        <div><b>Size</b><span id="size"></span></div>
+      </div>
+      <div class="actions">
+        <a id="dl" class="btn" href="#" target="_blank" rel="noopener">⬇ Download APK</a>
+        <button id="copy" class="secondary" type="button">Copy link</button>
+        <a id="dlProxy" class="btn secondary" href="#" style="background:transparent;color:var(--accent);border:1px solid var(--line)">⬇ Download via server</a>
+      </div>
+      <div class="note" id="notes"></div>
+            <details><summary>Diagnostics</summary><pre id="diag"></pre></details>
+    </div>
+  </div>
+
+  <footer>APKs are fetched from third-party mirrors (APKPure, Aptoide, F-Droid, APKCombo), not from Google. Verify signatures before installing anything sensitive.</footer>
+</div>
+<div id="toasts" aria-live="polite"></div>
+
+<script>
+(function () {
+  'use strict';
+  var $ = function (id) { return document.getElementById(id); };
+  var form = $('form'), input = $('url'), go = $('go'), hint = $('inputHint');
+  var steps = $('steps'), errbox = $('errbox'), result = $('result');
+  var current = null;          // last successful resolution
+  var busy = false;
+
+  // ---------- toasts ----------
+  function toast(kind, title, body, ms) {
+    var t = document.createElement('div');
+    t.className = 'toast ' + (kind || '');
+    t.innerHTML = '<b></b><span></span>';
+    t.firstChild.textContent = title; t.lastChild.textContent = body || '';
+    $('toasts').appendChild(t);
+    setTimeout(function () { t.style.opacity = '0'; t.style.transition = 'opacity .3s'; setTimeout(function () { t.remove(); }, 320); }, ms || 5000);
+  }
+
+  // ---------- client-side pre-validation (fast feedback; server re-validates) ----------
+  var PKG_RE = /^[A-Za-z][A-Za-z0-9_]*(\.[A-Za-z][A-Za-z0-9_]*)+$/;
+  function quickCheck(v) {
+    v = v.trim();
+    if (!v) return 'Paste a Play Store URL to begin.';
+    if (PKG_RE.test(v)) return null;
+    if (/^market:\/\/details\?id=/i.test(v)) return null;
+    if (!/play\.google\.com/i.test(v)) return 'Only play.google.com links are supported.';
+    if (!/[?&]id=/.test(v)) return 'The link is missing the id= parameter (package name).';
+    return null;
+  }
+  input.addEventListener('input', function () {
+    var e = quickCheck(input.value);
+    input.classList.toggle('invalid', !!e && input.value.trim().length > 0);
+    hint.className = 'hint' + (e && input.value.trim() ? ' error' : '');
+    hint.textContent = e && input.value.trim() ? e : 'Free apps only. Also accepts market://details?id=… or a bare package like com.duolingo.';
+  });
+
+  // ---------- step UI ----------
+  function setStep(name, state) {
+    var all = steps.querySelectorAll('.step');
+    for (var i = 0; i < all.length; i++) {
+      var s = all[i];
+      if (s.dataset.step === name) s.className = 'step ' + state;
+    }
+  }
+  function resetSteps() {
+    var all = steps.querySelectorAll('.step');
+    for (var i = 0; i < all.length; i++) all[i].className = 'step';
+  }
+  var stepTimers = [];
+  function startProgress() {
+    resetSteps(); steps.classList.add('show');
+    setStep('parse', 'active');
+    // optimistic progression while the server works (server is a single call)
+    stepTimers.push(setTimeout(function () { setStep('parse', 'done'); setStep('play', 'active'); }, 600));
+    stepTimers.push(setTimeout(function () { setStep('play', 'done'); setStep('mirror', 'active'); }, 2200));
+    stepTimers.push(setTimeout(function () { setStep('mirror', 'done'); setStep('probe', 'active'); }, 5500));
+  }
+  function stopProgress(ok, failedAt) {
+    stepTimers.forEach(clearTimeout); stepTimers = [];
+    var order = ['parse', 'play', 'mirror', 'probe'];
+    var idx = ok ? order.length : order.indexOf(failedAt);
+    order.forEach(function (n, i) { setStep(n, i < idx ? 'done' : (i === idx && !ok ? 'fail' : (ok ? 'done' : ''))); });
+    if (ok) setTimeout(function () { steps.classList.remove('show'); }, 900);
+  }
+  function failedStepFor(code) {
+    if (/EMPTY_INPUT|INVALID_URL|NOT_PLAY_URL|INVALID_PACKAGE|RATE_LIMITED/.test(code)) return 'parse';
+    if (/APP_NOT_FOUND|PAID_APP|PLAY_UNREACHABLE/.test(code)) return 'play';
+    if (/NO_PROVIDER|PROVIDER/.test(code)) return 'mirror';
+    return 'probe';
+  }
+
+  // ---------- rendering ----------
+  function showError(err) {
+    result.classList.remove('show');
+    $('errCode').textContent = err.code || 'ERROR';
+    $('errMsg').textContent = err.message || 'Unknown error.';
+    $('errHint').textContent = err.hint || '';
+    renderFallback(err.details && err.details.fallbackLinks);
+    errbox.classList.add('show');
+    toast('err', 'Could not get APK', err.message, 7000);
+  }
+  function renderFallback(links) {
+    var box = $('fallback'), wrap = $('fbLinks');
+    wrap.innerHTML = '';
+    if (!links || !links.length) { box.classList.remove('show'); return; }
+    links.forEach(function (l) {
+      if (!/^https:\/\//.test(l.url)) return;
+      var a = document.createElement('a'); a.href = l.url; a.target = '_blank'; a.rel = 'noopener noreferrer';
+      var left = document.createElement('div');
+      var b = document.createElement('div'); b.textContent = l.label; left.appendChild(b);
+      if (l.note) { var s = document.createElement('small'); s.textContent = l.note; left.appendChild(s); }
+      var tag = document.createElement('span'); tag.className = 'tag' + (l.kind === 'download' ? ' dl' : ''); tag.textContent = l.kind === 'download' ? 'direct download ↗' : 'open page ↗';
+      a.appendChild(left); a.appendChild(tag); wrap.appendChild(a);
+    });
+    box.classList.add('show');
+  }
+  function showResult(r) {
+    errbox.classList.remove('show');
+    current = r;
+    var a = r.app, d = r.download;
+    $('icon').src = a.icon || ''; $('icon').style.visibility = a.icon ? 'visible' : 'hidden';
+    $('title').textContent = a.title;
+    $('dev').textContent = a.developer ? 'by ' + a.developer + (a.rating ? ' · ★ ' + a.rating : '') : '';
+    $('pkg').textContent = r.package;
+    $('playLink').href = a.playUrl;
+    var geo = $('geoWarn'), rl = $('regionLine');
+    if (a.unlisted) {
+      rl.textContent = 'Not found on Google Play in ' + (a.regionsTried || []).length + ' countries checked.';
+      geo.textContent = '⚠ This package is not listed on Google Play in any country we checked (' + (a.regionsTried || []).join(', ') + '). The file below comes from a third-party mirror only — verify the signature before installing.';
+      geo.classList.add('show');
+      toast('warn', 'Not on Google Play', 'Delivered from a mirror without Play verification.', 7000);
+    } else if (a.geoRestricted) {
+      rl.textContent = 'Listed in the ' + a.region + ' Play Store (not available in ' + (a.regionsTried || [])[0] + (a.regionsTried && a.regionsTried.length > 2 ? ' or ' + (a.regionsTried.length - 2) + ' other' : '') + ' store' + (a.regionsTried && a.regionsTried.length > 2 ? 's' : '') + ').';
+      geo.textContent = 'ℹ Geo-restricted app: found in the ' + a.region + ' Google Play store after checking ' + (a.regionsTried || []).join(' → ') + '.';
+      geo.classList.add('show');
+    } else {
+      rl.textContent = a.region ? 'Listed in the ' + a.region + ' Play Store.' : '';
+      geo.classList.remove('show');
+    }
+    $('provider').textContent = d.provider;
+    $('kind').innerHTML = d.kind === 'XAPK' ? 'XAPK <span class="badge warn">bundle</span>' : 'APK <span class="badge">single file</span>';
+    $('version').textContent = d.version || 'latest';
+    $('size').textContent = d.sizeHuman || 'unknown';
+    $('dl').href = d.url;
+    $('dl').setAttribute('download', d.fileName || '');
+    $('notes').textContent = [d.notes, r.cached ? 'Served from cache.' : ''].filter(Boolean).join(' ');
+    $('dlProxy').href = d.proxyUrl || '#';
+    $('dlProxy').style.display = d.proxyUrl ? '' : 'none';
+    $('dlProxy').title = 'Streams the file through this server — use if the mirror blocks your network or needs a Referer.';
+    $('diag').textContent = JSON.stringify({ elapsedMs: r.elapsedMs, playRegion: a.region, regionsTried: a.regionsTried, attempts: r.attempts, fileName: d.fileName, contentType: d.contentType, md5: d.md5, store: d.store }, null, 2);
+    result.classList.add('show');
+    toast('ok', 'APK found', a.title + ' via ' + d.provider + (d.sizeHuman ? ' · ' + d.sizeHuman : ''));
+  }
+
+  // ---------- main submit ----------
+  form.addEventListener('submit', function (ev) {
+    ev.preventDefault();
+    if (busy) return;
+    var v = input.value.trim();
+    var pre = quickCheck(v);
+    if (pre) { showError({ code: 'INVALID_INPUT', message: pre, hint: 'Example: https://play.google.com/store/apps/details?id=com.whatsapp' }); return; }
+
+    busy = true; go.disabled = true; go.textContent = 'Working…';
+    errbox.classList.remove('show'); result.classList.remove('show');
+    startProgress();
+
+    var timeout = setTimeout(function () {
+      toast('warn', 'Still working…', 'Checking several Play regions and mirrors. Hang tight.', 6000);
+    }, 12000);
+
+    // Keep the URL shareable: /?url=<input>
+    try { history.replaceState(null, '', '?url=' + encodeURIComponent(v)); } catch (_) {}
+
+    var ctrl = ('AbortController' in window) ? new AbortController() : null;
+    var hardStop = setTimeout(function () { if (ctrl) ctrl.abort(); }, 90000);
+    fetch('/api/resolve?input=' + encodeURIComponent(v), { headers: { 'Accept': 'application/json' }, signal: ctrl ? ctrl.signal : undefined })
+      .then(function (res) {
+        return res.json().catch(function () { return { ok: false, error: { code: 'HTTP_' + res.status, message: 'Server returned HTTP ' + res.status + ' without a JSON body.', hint: 'Reload the page and try again.' } }; });
+      })
+      .then(function (r) {
+        clearTimeout(timeout); clearTimeout(hardStop);
+        if (!r || typeof r !== 'object') { r = { ok: false, error: { code: 'BAD_RESPONSE', message: 'Empty response from server.', hint: 'Reload the page and try again.' } }; }
+        if (r.ok) { stopProgress(true); showResult(r); }
+        else { stopProgress(false, failedStepFor(r.error.code)); showError(r.error); }
+        done();
+      })
+      .catch(function (e) {
+        clearTimeout(timeout); clearTimeout(hardStop);
+        stopProgress(false, 'probe');
+        var aborted = e && e.name === 'AbortError';
+        showError({ code: aborted ? 'TIMEOUT' : 'NETWORK_ERROR', message: aborted ? 'The server took more than 90 seconds to answer.' : ('Could not reach the server: ' + ((e && e.message) || e)), hint: aborted ? 'Mirrors were slow — try again in a moment.' : 'Check your connection, or the service may be restarting (Render free tier sleeps after inactivity — the first request can take ~30 s).' });
+        done();
+      });
+
+    function done() { busy = false; go.disabled = false; go.textContent = 'Get APK'; }
+  });
+
+  // ---------- copy link ----------
+  $('copy').addEventListener('click', function () {
+    if (!current) return;
+    var url = current.download.url;
+    var fallback = function () {
+      var ta = document.createElement('textarea'); ta.value = url; document.body.appendChild(ta); ta.select();
+      try { document.execCommand('copy'); toast('ok', 'Link copied'); } catch (_) { toast('err', 'Copy failed', 'Select and copy the link manually.'); }
+      ta.remove();
+    };
+    if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(function () { toast('ok', 'Link copied'); }, fallback);
+    else fallback();
+  });
+
+  // Surface uncaught client errors instead of failing silently.
+  window.addEventListener('error', function (ev) { toast('err', 'Page error', ev.message || 'Unexpected error', 6000); });
+  window.addEventListener('unhandledrejection', function (ev) { toast('err', 'Page error', (ev.reason && ev.reason.message) || String(ev.reason), 6000); });
+
+  // Deep links: /?url=<Play URL>  or  /?id=<package>  -> prefill and auto-run
+  try {
+    var q = new URLSearchParams(location.search);
+    var pre = q.get('url') || q.get('id') || q.get('input');
+    if (pre) { input.value = pre; input.dispatchEvent(new Event('input')); if (q.get('run') !== '0') form.dispatchEvent(new Event('submit', { cancelable: true })); }
+  } catch (_) {}
+})();
+</script>
+</body>
+</html>
