@@ -214,6 +214,8 @@ async function fetchPlayMetadataAnyRegion(pkg, hints) {
 // ----------------------------------------------------------------------------
 // Providers
 // ----------------------------------------------------------------------------
+const APKPURE_APP_HEADERS = { 'x-cv': '3172501', 'x-sv': '29', 'x-abis': 'arm64-v8a,armeabi-v7a,armeabi,x86,x86_64', 'x-gp': '1', 'User-Agent': 'APKPure/3.17.25 (Aegon)', Accept: '*/*' };
+
 const PROVIDERS = {
   /**
    * APKPure — two routes:
@@ -225,9 +227,7 @@ const PROVIDERS = {
   async apkpure(pkg, app) {
     // (a) app API
     try {
-      const r = await httpFetch(`https://api.pureapk.com/m/v3/cms/app_version?hl=en-US&package_name=${encodeURIComponent(pkg)}`, {
-        headers: { 'x-cv': '3172501', 'x-sv': '29', 'x-abis': 'arm64-v8a,armeabi-v7a,armeabi,x86,x86_64', 'x-gp': '1', 'User-Agent': 'APKPure/3.17.25 (Aegon)', Accept: '*/*' }
-      });
+      const r = await httpFetch(`https://api.pureapk.com/m/v3/cms/app_version?hl=en-US&package_name=${encodeURIComponent(pkg)}`, { headers: APKPURE_APP_HEADERS });
       if (r.status === 200) {
         const body = Buffer.from(await r.arrayBuffer()).toString('latin1');
         const m = body.match(/(X?APKJ)..(https?:\/\/[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b[-a-zA-Z0-9()@:%_+.~#?&/=]*)/);
@@ -409,7 +409,10 @@ async function diagnoseProviders(pkg) {
     ['Play IN', `https://play.google.com/store/apps/details?id=${pkg}&hl=en&gl=IN`, {}],
     ['Play MX', `https://play.google.com/store/apps/details?id=${pkg}&hl=es&gl=MX`, {}],
     ['Aptoide', `https://ws75.aptoide.com/api/7/listAppVersions?package_name=${pkg}&limit=3`, {}],
-    ['APKPure app API', `https://api.pureapk.com/m/v3/cms/app_version?hl=en-US&package_name=${pkg}`, { headers: { 'x-cv': '3172501', 'x-sv': '29', 'x-abis': 'arm64-v8a,armeabi-v7a,armeabi,x86,x86_64', 'x-gp': '1', 'User-Agent': 'APKPure/3.17.25 (Aegon)' } }],
+    ['APKPure app API', `https://api.pureapk.com/m/v3/cms/app_version?hl=en-US&package_name=${pkg}`, { headers: APKPURE_APP_HEADERS }],
+    ['APKPure app API es-MX', `https://api.pureapk.com/m/v3/cms/app_version?hl=es-MX&package_name=${pkg}`, { headers: APKPURE_APP_HEADERS }],
+    ['APKPure app detail', `https://api.pureapk.com/m/v3/app/detail?hl=en-US&package_name=${pkg}`, { headers: APKPURE_APP_HEADERS }],
+    ['APKPure tapi his_version', `https://tapi.pureapk.com/v3/get_app_his_version?hl=en&package_name=${pkg}`, { headers: APKPURE_APP_HEADERS }],
     ['APKPure d.', `https://d.apkpure.com/b/APK/${pkg}?version=latest`, { redirect: 'manual', headers: { Referer: 'https://apkpure.com/', 'User-Agent': CONFIG.DESKTOP_USER_AGENT } }],
     ['APKCombo', `https://apkcombo.com/genericApp/${pkg}/download/apk`, { headers: { Referer: 'https://apkcombo.com/', 'User-Agent': CONFIG.DESKTOP_USER_AGENT } }],
     ['F-Droid', `https://f-droid.org/api/v1/packages/${pkg}`, {}]
