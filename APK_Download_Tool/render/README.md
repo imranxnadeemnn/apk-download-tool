@@ -19,7 +19,13 @@ GET /healthz
    Title / developer / icon / price come from the page's JSON-LD; paid apps are rejected.
    Not on Play anywhere → still tries mirrors (`ALLOW_UNLISTED_APPS=true`) but the UI shows a warning.
 3. **Provider chain** (`PROVIDER_ORDER`, default `apkpure,aptoide,fdroid,apkcombo`):
-   * **APKPure** — `d.apkpure.com/b/APK|XAPK/<pkg>?version=latest` → 302 to the CDN file. Latest Play build. Cloudflare-fronted.
+   * **APKPure** — two routes. (a) The APKPure *Android app's* API (`api.pureapk.com/m/v3/cms/app_version`,
+     then `app/detail`) with the app's `x-cv/x-sv/x-abis/x-gp` headers — the same trick EFF's `apkeep` uses. It is
+     **not** behind the Cloudflare JS challenge (a native app can't solve one), so it works from Render's IPs and
+     returns the current Play build (verified live: WhatsApp 2.26.36.74, Duolingo 177 MB XAPK). The protobuf reply
+     is scanned for `APKJ`/`XAPKJ` CDN links; each link's base64 path is decoded and matched to the package so a
+     "related app" is never returned by mistake. (b) The web redirect `d.apkpure.com/b/APK/<pkg>?version=latest`
+     — Cloudflare 403s datacenter IPs (Render and Google alike); kept as a fallback and as a browser-side link.
    * **Aptoide** — public JSON API; newest build with `malware.rank == TRUSTED` (signature matches the Play developer key).
    * **F-Droid** — open-source apps.
    * **APKCombo** — page scrape + `/checkin` token.
@@ -36,9 +42,17 @@ GET /healthz
   PROVIDER_BLOCKED PROVIDER_MISS NO_PROVIDER RATE_LIMITED PROXY_ERROR INTERNAL_ERROR`.
 * Per-IP rate limit (`RATE_LIMIT_MAX`/`RATE_LIMIT_WINDOW_SEC`), 15 s upstream timeouts, 90 s client timeout.
 * Proxy: host allow-list, HTML/bot pages rejected, `MAX_PROXY_BYTES` cap, `Range` pass-through for resumable downloads.
-* JSON-line logs to stdout (Render → Logs). Failure notifications (all mirrors failed / internal error), throttled per
-  package, via **`NOTIFY_WEBHOOK_URL`** (Slack/Teams incoming webhook) and/or **SMTP** (`SMTP_URL`, `NOTIFY_EMAIL_TO`,
-  optional `NOTIFY_EMAIL_FROM`; `npm i nodemailer`). User typos never trigger a notification.
+* JSON-line logs to stdout (Render → Logs).
+* **In-app notifications — no Slack / Teams / e-mail.** The server keeps an in-memory event feed
+  (`NOTIFY_MAX_EVENTS`, default 200) of every resolve: `success` (app → mirror, version, size), `failure`
+  (all mirrors missed / blocked, with the per-provider attempt list), `error` (upstream or internal) and `alert`.
+  Alerts are raised once per key per window (`NOTIFY_ALERT_WINDOW_SEC`, default 600 s) when a provider is blocked
+  `NOTIFY_ALERT_THRESHOLD` (default 3) times, or when a Play-listed app has **no** mirror at all. User typos
+  (`INVALID_URL`, `NOT_PLAY_URL`, …) never create events.
+  `GET /api/notifications?since=<id>&limit=<n>` returns `{ latestId, summary:{success,failure,error,alerts,
+  blockedProviders}, events[] }` (newest first). The UI polls it every 15 s and shows a **bell with an unread badge**;
+  clicking it opens the *Activity & alerts* panel (filter to alerts, mark read, one-click "Look up" rerun).
+  The feed is per-instance and resets on redeploy / sleep by design.
 * UI: client pre-validation, progress stepper, toasts, error panel with code+hint, geo banner, fallback links,
   shareable `/?url=…` deep links that auto-run.
 
@@ -47,9 +61,36 @@ GET /healthz
 1. Push this folder to a Git repo (GitHub/GitLab/Bitbucket).
 2. Render dashboard → **New → Blueprint** (uses `render.yaml`), or **New → Web Service** with
    Runtime *Node*, Build `npm install --omit=dev`, Start `npm start`, Health check `/healthz`.
-3. Optional env vars: `NOTIFY_WEBHOOK_URL`, `SMTP_URL` + `NOTIFY_EMAIL_TO`, `DIAG_TOKEN`, `PROVIDER_ORDER`, `PLAY_DEFAULT_REGION`.
+3. Optional env vars: `DIAG_TOKEN`, `PROVIDER_ORDER`, `PLAY_DEFAULT_REGION`, `NOTIFY_ALERT_THRESHOLD`,
+   `NOTIFY_ALERT_WINDOW_SEC`, `NOTIFY_MAX_EVENTS`.
 4. Open `https://<service>.onrender.com/api/diagnose?pkg=com.brazino.mexico&token=<DIAG_TOKEN>` to see which mirrors
    serve Render's IPs — then order `PROVIDER_ORDER` accordingly.
+
+**Live:** <https://apk-download-tool.onrender.com> (repo `imranxnadeemnn/apk-download-tool`, root dir
+`APK_Download_Tool/render`, Free plan, Singapore). Public-repo services do **not** auto-deploy: after a commit use
+*Manual Deploy → Deploy latest commit* in the Render dashboard.
+
+## What was learned about "blocked" mirrors (Sep 2026)
+
+| Endpoint | From Google Apps Script | From Render (AWS Singapore) |
+|---|---|---|
+| Google Play pages (any `gl`) | OK | OK |
+| Aptoide JSON API | OK | OK |
+| F-Droid API | OK | OK |
+| APKCombo (with `Referer`) | bot challenge → OK | OK (410 = app not carried) |
+| APKPure web `d.apkpure.com` | 403 Cloudflare | 403 Cloudflare |
+| **APKPure app API `api.pureapk.com`** | not tried (needs binary parsing) | **OK — current Play builds** |
+
+So the block was never Apps-Script-specific: Cloudflare challenges *all* datacenter IPs on APKPure's web endpoints.
+The app API sidesteps it, and Node can parse the protobuf blob and stream the 100 MB+ files that Apps Script's
+50 MB `UrlFetchApp` cap could not.
+
+**Region-limited apps such as `com.brazino.mexico` (Brazino777, MX-only)** are a different problem: no mirror
+*hosts* the file at all — Aptoide/F-Droid/APKCombo don't have it, and APKPure's own site redirects to its "Online
+APK Downloader for region-limited apps", which fetches from Google Play on demand with APKPure's device accounts.
+The tool detects the app correctly (Play MX store, title, developer) and returns `NO_PROVIDER` with browser-side
+links (APKPure's online downloader works from a normal browser). Serving these server-side requires talking to
+Google Play's device API with an account/anonymous token (Aurora-style) — a possible next step, not a mirror fix.
 
 Free tier note: the instance sleeps after 15 min idle; the first request then takes ~30 s (the UI says so).
 
