@@ -47,14 +47,22 @@ Modern apps are published as app bundles, so mirrors usually hold an **XAPK** (b
    the UI polls `/api/convert/:id` (download → merge → sign progress) and then offers `/api/convert/:id/file`,
    served as `application/vnd.android.package-archive` so an Android browser installs it on tap.
    * Bundle with **one** apk inside → `base.apk` is extracted **unchanged** (developer signature intact).
-   * Bundle with **splits** → [APKEditor](https://github.com/REAndroid/APKEditor) merges them into a universal
-     APK (`isSplitRequired` removed), then [uber-apk-signer](https://github.com/patrickfav/uber-apk-signer) signs
-     it v1+v2+v3 and zipaligns. **This re-signs the app with the tool's key**: it installs as a fresh app, will not
-     update a Play-installed copy, and apps that verify their own signature may refuse to run. The UI says so.
+   * Bundle with **splits**, up to `CONVERT_FULL_MERGE_MAX_BYTES` (60 MB) → [APKEditor](https://github.com/REAndroid/APKEditor)
+     merges them into a universal APK (`isSplitRequired` removed, all density/language resources kept).
+   * Bigger bundles, or a full merge that runs out of heap / exceeds `CONVERT_MERGE_TIMEOUT_MS` (150 s) → **light
+     merge** in Node (`lib/lightmerge.js`): `base.apk` + every `lib/<abi>/*.so` from the ABI splits, streamed; the
+     binary `AndroidManifest.xml` is patched in place (`isSplitRequired=false`, `extractNativeLibs=true`,
+     `requiredSplitTypes`/`splitTypes` un-namespaced). Density/language split resources are *not* merged — bundletool
+     keeps a default variant of every resource in the base module, so the app runs with default artwork and language.
+     The result card says which mode was used.
+   * Either way [uber-apk-signer](https://github.com/patrickfav/uber-apk-signer) then signs it v1+v2+v3 and zipaligns.
+     **This re-signs the app with the tool's key**: it installs as a fresh app, will not update a Play-installed copy,
+     and apps that verify their own signature may refuse to run. The UI says so.
    * OBB expansion files are not merged (the APK is still installable; the app fetches its data on first run).
 3. **Still offers the XAPK** as a secondary link for people who use the APKPure app / SAI.
 
-Jobs run one at a time (`CONVERT_JAVA_XMX`, default 320m, fits the 512 MB free instance), files live in the OS
+Jobs run one at a time (`CONVERT_JAVA_XMX` 400m for APKEditor, `CONVERT_SIGNER_XMX` 256m; fits the 512 MB free
+instance), files live in the OS
 temp dir and expire after `CONVERT_TTL_SEC` (1800). Bundles above `CONVERT_MAX_BYTES` (700 MB) are refused.
 `tools/setup-java.js` (npm `postinstall`) downloads the two jars and, when the image has no `java`, a Temurin 17
 JRE into `.jre/`. Without them the tool still works — only the convert button reports unavailable.
@@ -87,7 +95,8 @@ JRE into `.jre/`. Without them the tool still works — only the convert button 
 2. Render dashboard → **New → Blueprint** (uses `render.yaml`), or **New → Web Service** with
    Runtime *Node*, Build `npm install --omit=dev`, Start `npm start`, Health check `/healthz`.
 3. Optional env vars: `DIAG_TOKEN`, `PROVIDER_ORDER`, `PLAY_DEFAULT_REGION`, `NOTIFY_ALERT_THRESHOLD`,
-   `NOTIFY_ALERT_WINDOW_SEC`, `NOTIFY_MAX_EVENTS`, `CONVERT_JAVA_XMX`, `CONVERT_MAX_BYTES`, `CONVERT_TTL_SEC`, `JAVA_BIN`.
+   `NOTIFY_ALERT_WINDOW_SEC`, `NOTIFY_MAX_EVENTS`, `CONVERT_JAVA_XMX`, `CONVERT_SIGNER_XMX`, `CONVERT_FULL_MERGE_MAX_BYTES`,
+   `CONVERT_MERGE_TIMEOUT_MS`, `CONVERT_MAX_BYTES`, `CONVERT_TTL_SEC`, `JAVA_BIN`.
 4. Open `https://<service>.onrender.com/api/diagnose?pkg=com.brazino.mexico&token=<DIAG_TOKEN>` to see which mirrors
    serve Render's IPs — then order `PROVIDER_ORDER` accordingly.
 
