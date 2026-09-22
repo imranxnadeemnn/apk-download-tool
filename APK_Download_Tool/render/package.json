@@ -12,8 +12,5 @@
   "dependencies": {
     "express": "^4.21.2"
   },
-  "optionalDependencies": {
-    "nodemailer": "^6.9.16"
-  },
   "license": "MIT"
 }
