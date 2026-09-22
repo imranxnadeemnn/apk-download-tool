@@ -4,7 +4,9 @@
   "description": "Google Play URL -> APK download link (multi-region Play lookup, free mirror chain, streaming proxy, XAPK -> APK conversion)",
   "main": "server.js",
   "type": "commonjs",
-  "engines": { "node": ">=20" },
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "start": "node server.js",
     "test": "node test/core.test.js",
@@ -12,7 +14,8 @@
   },
   "dependencies": {
     "express": "^4.21.2",
-    "yauzl": "^3.2.0"
+    "yauzl": "^3.2.0",
+    "yazl": "^3.3.1"
   },
   "license": "MIT"
 }
