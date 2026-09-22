@@ -15,6 +15,7 @@
  * English-only strings. The UI tells the user this.
  */
 const fs = require('fs');
+const { PassThrough } = require('stream');
 const yauzl = require('yauzl');
 const yazl = require('yazl');
 
@@ -55,6 +56,19 @@ function entriesOf(zip) {
   return new Promise((res, rej) => { const out = []; zip.on('entry', en => { out.push(en); zip.readEntry(); }); zip.on('end', () => res(out)); zip.on('error', rej); zip.readEntry(); });
 }
 function streamOf(zip, entry) { return new Promise((res, rej) => zip.openReadStream(entry, (e, s) => e ? rej(e) : res(s))); }
+/**
+ * A stream that opens the zip entry only when yazl actually starts consuming it. Opening every entry's stream up
+ * front makes each one pre-buffer 64 KB (and inflate), which for a few thousand entries pins hundreds of MB —
+ * enough to get the 512 MB Render instance OOM-killed. Lazy = one entry in flight at a time.
+ */
+function lazyStreamOf(zip, entry) {
+  const pt = new PassThrough({ highWaterMark: 64 * 1024 });
+  let opened = false;
+  const open = () => { if (opened) return; opened = true; zip.openReadStream(entry, (e, s) => { if (e) return pt.destroy(e); s.on('error', err => pt.destroy(err)); s.pipe(pt); }); };
+  pt.once('resume', open);
+  pt.once('pipe', open);          // in case a consumer pipes without resuming first
+  return pt;
+}
 function bufferOf(zip, entry) { return streamOf(zip, entry).then(s => new Promise((res, rej) => { const b = []; s.on('data', d => b.push(d)); s.on('end', () => res(Buffer.concat(b))); s.on('error', rej); })); }
 
 /**
@@ -81,7 +95,7 @@ async function lightMerge(baseApk, splitApks, out) {
       patched = patchManifest(buf).patched;
       zf.addBuffer(buf, n, { compress: !stored });
     } else {
-      zf.addReadStream(await streamOf(base, en), n, { compress: !stored });
+      zf.addReadStream(lazyStreamOf(base, en), n, { compress: !stored });
     }
   }
   for (const sp of splitApks) {
@@ -91,12 +105,13 @@ async function lightMerge(baseApk, splitApks, out) {
       const n = en.fileName;
       if (!/^lib\/[^/]+\/[^/]+\.so$/.test(n) || seen.has(n)) continue;
       seen.add(n); libs++; took++;
-      zf.addReadStream(await streamOf(z, en), n, { compress: true });
+      zf.addReadStream(lazyStreamOf(z, en), n, { compress: true });
     }
     if (!took) skipped.push(sp.split('/').pop());
   }
   zf.end();
   await done;
+  try { base.close(); } catch { /* ignore */ }
   return { libs, patched, skippedSplits: skipped };
 }
 
