@@ -216,6 +216,27 @@ async function fetchPlayMetadataAnyRegion(pkg, hints) {
 // ----------------------------------------------------------------------------
 const APKPURE_APP_HEADERS = { 'x-cv': '3172501', 'x-sv': '29', 'x-abis': 'arm64-v8a,armeabi-v7a,armeabi,x86,x86_64', 'x-gp': '1', 'User-Agent': 'APKPure/3.17.25 (Aegon)', Accept: '*/*' };
 
+/**
+ * Pull every APK/XAPK CDN link out of an APKPure protobuf blob and keep the ones that belong to `pkg`.
+ * CDN paths look like  https://download.pureapk.com/b/XAPK/<b64(pkg_versioncode_hash)>?_fn=<b64(filename)>&...
+ */
+function apkpureCandidates(body, pkg) {
+  const out = [];
+  const re = /(X?APKJ)..(https?:\/\/[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b[-a-zA-Z0-9()@:%_+.~#?&/=]*)/g;
+  let m;
+  while ((m = re.exec(body))) {
+    const url = m[2];
+    let decodedPath = '', fileName = null;
+    try { const seg = new URL(url).pathname.split('/').pop(); decodedPath = Buffer.from(seg.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'); } catch { /* ignore */ }
+    try { const fn = new URL(url).searchParams.get('_fn'); if (fn) fileName = Buffer.from(fn.replace(/-/g, '+').replace(/_/g, '/'), 'base64').toString('utf8'); } catch { /* ignore */ }
+    if (!decodedPath.startsWith(pkg + '_')) continue;
+    const vc = Number((decodedPath.match(/_(\d+)_/) || [])[1]) || null;
+    const ver = fileName && (fileName.match(/_v?(\d+(?:\.\d+)+)/) || [])[1];
+    if (!out.some(o => o.url === url)) out.push({ kind: m[1] === 'XAPKJ' ? 'XAPK' : 'APK', url, versionCode: vc, version: ver || null, fileName: fileName ? sanitizeFileName(fileName) : null });
+  }
+  return out;
+}
+
 const PROVIDERS = {
   /**
    * APKPure — two routes:
@@ -225,27 +246,26 @@ const PROVIDERS = {
    *  (b) the web redirect endpoint d.apkpure.com (Cloudflare-fronted; often 403 for datacenter IPs).
    */
   async apkpure(pkg, app) {
-    // (a) app API
-    try {
-      const r = await httpFetch(`https://api.pureapk.com/m/v3/cms/app_version?hl=en-US&package_name=${encodeURIComponent(pkg)}`, { headers: APKPURE_APP_HEADERS });
-      if (r.status === 200) {
+    // (a) app API — try the version list first, then the app-detail endpoint (which also lists
+    //     related apps, so every candidate URL is decoded and matched against the package name).
+    let apiMiss = false;
+    for (const endpoint of ['cms/app_version', 'app/detail']) {
+      try {
+        const r = await httpFetch(`https://api.pureapk.com/m/v3/${endpoint}?hl=en-US&package_name=${encodeURIComponent(pkg)}`, { headers: APKPURE_APP_HEADERS });
+        if (r.status !== 200) { r.body?.cancel?.(); if ([403, 429, 503].includes(r.status)) break; continue; }
         const body = Buffer.from(await r.arrayBuffer()).toString('latin1');
-        const m = body.match(/(X?APKJ)..(https?:\/\/[-a-zA-Z0-9@:%._+~#=]{1,256}\.[a-zA-Z0-9()]{1,6}\b[-a-zA-Z0-9()@:%_+.~#?&/=]*)/);
-        if (m) {
-          const kind = m[1] === 'XAPKJ' ? 'XAPK' : 'APK', cdnUrl = m[2];
-          const vm = body.match(/(\d+\.\d+(?:\.\d+){0,3})/);     // first version-looking token = latest
-          const probe = await probeFile(cdnUrl);
-          if (probe.ok) {
-            return { provider: 'APKPure', route: 'app-api', url: cdnUrl, kind, fileName: probe.fileName || `${safeBase(app.title)}_${pkg}.${kind.toLowerCase()}`, sizeBytes: probe.sizeBytes, contentType: probe.contentType, version: probe.version || (vm ? vm[1] : 'latest'),
-              notes: kind === 'XAPK' ? 'XAPK bundle — install with the APKPure app / SAI, or unzip to get base APK + splits/OBB.' : '' };
-          }
-        } else if (/"package_name"|not found|no data/i.test(body) || body.length < 200) {
-          throw new ApkToolError(ERR.PROVIDER_MISS, 'APKPure app API has no build for this package.');
+        const cands = apkpureCandidates(body, pkg);
+        if (!cands.length) { if (/INVALID_COMMAND/.test(body) || body.length < 200) apiMiss = true; continue; }
+        // newest version code first
+        cands.sort((a, b) => (b.versionCode || 0) - (a.versionCode || 0));
+        for (const c of cands) {
+          const probe = await probeFile(c.url);
+          if (!probe.ok) continue;
+          return { provider: 'APKPure', route: 'app-api:' + endpoint, url: c.url, kind: c.kind, fileName: probe.fileName || c.fileName || `${safeBase(app.title)}_${pkg}.${c.kind.toLowerCase()}`, sizeBytes: probe.sizeBytes, contentType: probe.contentType, version: c.version || probe.version || 'latest', versionCode: c.versionCode || null,
+            notes: c.kind === 'XAPK' ? 'XAPK bundle — install with the APKPure app / SAI, or unzip to get base APK + splits/OBB.' : '' };
         }
-      } else if ([403, 429, 503].includes(r.status)) {
-        r.body?.cancel?.();
-      } else { r.body?.cancel?.(); }
-    } catch (e) { if (e.code === ERR.PROVIDER_MISS) throw e; /* network/blocked: fall through to route (b) */ }
+      } catch (e) { /* network: try next endpoint / route */ }
+    }
 
     // (b) web redirect
     let lastCode = null;
@@ -422,8 +442,8 @@ async function diagnoseProviders(pkg) {
     try {
       const r = await httpFetch(url, opts);
       const raw = Buffer.from(await r.arrayBuffer()).toString('latin1');
-      const apk = raw.match(/(X?APKJ)..(https?:\/\/[^\s"'\x00-\x1f]{10,200})/);
-      out.push({ name, status: r.status, contentType: r.headers.get('content-type'), location: r.headers.get('location'), bytes: raw.length, apkMarker: apk ? { kind: apk[1], url: apk[2].slice(0, 120) } : undefined, body: raw.slice(0, 160).replace(/[^\x20-\x7e]/g, '.') });
+      const cands = apkpureCandidates(raw, pkg).map(c => ({ kind: c.kind, versionCode: c.versionCode, version: c.version, fileName: c.fileName, url: c.url.slice(0, 100) }));
+      out.push({ name, status: r.status, contentType: r.headers.get('content-type'), location: r.headers.get('location'), bytes: raw.length, apkCandidates: cands.length ? cands : undefined, body: raw.slice(0, 160).replace(/[^\x20-\x7e]/g, '.') });
     } catch (e) { out.push({ name, error: e.message }); }
   }
   return out;
@@ -445,4 +465,4 @@ function sanitizeFileName(name) {
 }
 function safeBase(title) { return String(title || 'app').replace(/[^A-Za-z0-9]+/g, '_').replace(/^_+|_+$/g, '').slice(0, 40) || 'app'; }
 
-module.exports = { CONFIG, ERR, ApkToolError, toErrorPayload, httpFetch, probeFile, extractPackageName, extractStoreHints, fetchPlayMetadataAnyRegion, PROVIDERS, browserFallbackLinks, resolveApk, diagnoseProviders, humanSize, sanitizeFileName };
+module.exports = { CONFIG, ERR, ApkToolError, toErrorPayload, httpFetch, probeFile, apkpureCandidates, extractPackageName, extractStoreHints, fetchPlayMetadataAnyRegion, PROVIDERS, browserFallbackLinks, resolveApk, diagnoseProviders, humanSize, sanitizeFileName };
