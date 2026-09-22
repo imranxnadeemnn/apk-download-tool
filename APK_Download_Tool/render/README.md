@@ -7,6 +7,7 @@ server can (a) talk to mirrors that block Google's IP ranges and (b) **stream th
 GET /                          UI
 GET /api/resolve?input=<url|market://|package>
 GET /api/download?u=<mirror url>&name=<file>     streaming proxy (known mirror hosts only, ZIP-checked, size-capped)
+GET /api/convert?u=<xapk url>&name=&pkg=          start / reuse an XAPK -> single-APK job; /api/convert/:id status; /:id/file result
 GET /api/diagnose?pkg=<package>[&token=…]        raw HTTP status of each mirror from THIS server's IP
 GET /healthz
 ```
@@ -33,6 +34,30 @@ GET /healthz
    challenge page is never presented as an APK.
 5. Result → direct mirror link **and** a `/api/download` proxy link (server streams it; hides mirror tokens/Referer).
    If every mirror fails, the error carries **browser-side fallback links** (APKPure/APKCombo/APKMirror/Uptodown/Play).
+
+## APK, not XAPK — installable directly on a device
+
+Modern apps are published as app bundles, so mirrors usually hold an **XAPK** (base.apk + `config.*.apk` splits
++ optional OBB) which Android cannot install by tapping it. The tool does three things about that:
+
+1. **Prefers a plain APK.** Within APKPure, an APK candidate beats an XAPK of the same build. Across mirrors, an
+   XAPK is remembered and the chain keeps going; another mirror's APK wins only if its `versionCode` is at least
+   as new (Aptoide's Duolingo, for example, is a 2020 build — the bundle wins there).
+2. **Converts the bundle on the server** — *Get installable APK* in the UI → `GET /api/convert?u=…` starts a job,
+   the UI polls `/api/convert/:id` (download → merge → sign progress) and then offers `/api/convert/:id/file`,
+   served as `application/vnd.android.package-archive` so an Android browser installs it on tap.
+   * Bundle with **one** apk inside → `base.apk` is extracted **unchanged** (developer signature intact).
+   * Bundle with **splits** → [APKEditor](https://github.com/REAndroid/APKEditor) merges them into a universal
+     APK (`isSplitRequired` removed), then [uber-apk-signer](https://github.com/patrickfav/uber-apk-signer) signs
+     it v1+v2+v3 and zipaligns. **This re-signs the app with the tool's key**: it installs as a fresh app, will not
+     update a Play-installed copy, and apps that verify their own signature may refuse to run. The UI says so.
+   * OBB expansion files are not merged (the APK is still installable; the app fetches its data on first run).
+3. **Still offers the XAPK** as a secondary link for people who use the APKPure app / SAI.
+
+Jobs run one at a time (`CONVERT_JAVA_XMX`, default 320m, fits the 512 MB free instance), files live in the OS
+temp dir and expire after `CONVERT_TTL_SEC` (1800). Bundles above `CONVERT_MAX_BYTES` (700 MB) are refused.
+`tools/setup-java.js` (npm `postinstall`) downloads the two jars and, when the image has no `java`, a Temurin 17
+JRE into `.jre/`. Without them the tool still works — only the convert button reports unavailable.
 
 ## Error & notification handling
 
@@ -62,7 +87,7 @@ GET /healthz
 2. Render dashboard → **New → Blueprint** (uses `render.yaml`), or **New → Web Service** with
    Runtime *Node*, Build `npm install --omit=dev`, Start `npm start`, Health check `/healthz`.
 3. Optional env vars: `DIAG_TOKEN`, `PROVIDER_ORDER`, `PLAY_DEFAULT_REGION`, `NOTIFY_ALERT_THRESHOLD`,
-   `NOTIFY_ALERT_WINDOW_SEC`, `NOTIFY_MAX_EVENTS`.
+   `NOTIFY_ALERT_WINDOW_SEC`, `NOTIFY_MAX_EVENTS`, `CONVERT_JAVA_XMX`, `CONVERT_MAX_BYTES`, `CONVERT_TTL_SEC`, `JAVA_BIN`.
 4. Open `https://<service>.onrender.com/api/diagnose?pkg=com.brazino.mexico&token=<DIAG_TOKEN>` to see which mirrors
    serve Render's IPs — then order `PROVIDER_ORDER` accordingly.
 
@@ -97,7 +122,7 @@ Free tier note: the instance sleeps after 15 min idle; the first request then ta
 ## Local
 
 ```
-npm install
+npm install       # also fetches APKEditor / uber-apk-signer jars (SKIP_JAVA_SETUP=1 to skip)
 npm test          # offline unit tests (fetch mocked)
 PORT=3000 npm start
 ```
