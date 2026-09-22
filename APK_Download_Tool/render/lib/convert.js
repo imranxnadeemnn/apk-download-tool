@@ -22,6 +22,7 @@ const { spawn } = require('child_process');
 const { Readable } = require('stream');
 const yauzl = require('yauzl');
 const core = require('./core');
+const { lightMerge } = require('./lightmerge');
 
 const ROOT = path.join(__dirname, '..');
 const JARS = path.join(ROOT, 'tools', 'jars');
@@ -29,11 +30,17 @@ const CFG = {
   javaBin: process.env.JAVA_BIN || (fs.existsSync(path.join(ROOT, '.jre', 'bin', 'java')) ? path.join(ROOT, '.jre', 'bin', 'java') : 'java'),
   apkEditor: process.env.APKEDITOR_JAR || path.join(JARS, 'APKEditor.jar'),
   signer: process.env.APKSIGNER_JAR || path.join(JARS, 'uber-apk-signer.jar'),
-  xmx: process.env.CONVERT_JAVA_XMX || '400m',     // free Render instance = 512 MB; node itself needs ~70 MB
+  xmx: process.env.CONVERT_JAVA_XMX || '400m',     // APKEditor heap; free Render instance = 512 MB, node itself needs ~70 MB
+  signerXmx: process.env.CONVERT_SIGNER_XMX || '256m',
   maxBytes: Number(process.env.CONVERT_MAX_BYTES || 700 * 1024 * 1024),
   ttlSec: Number(process.env.CONVERT_TTL_SEC || 1800),
   workDir: process.env.CONVERT_DIR || path.join(os.tmpdir(), 'apk-convert'),
-  stepTimeoutMs: Number(process.env.CONVERT_STEP_TIMEOUT_MS || 6 * 60 * 1000)
+  stepTimeoutMs: Number(process.env.CONVERT_STEP_TIMEOUT_MS || 6 * 60 * 1000),
+  // Full resource merge (APKEditor) is only attempted for bundles up to this size and for this long; bigger or
+  // slower ones go straight to the streaming light merge. On Render's free tier (0.1 CPU, 512 MB) a 180 MB game
+  // takes > 6 min and then runs out of heap, so this keeps the wait predictable.
+  fullMergeMaxBytes: Number(process.env.CONVERT_FULL_MERGE_MAX_BYTES || 60 * 1024 * 1024),
+  mergeTimeoutMs: Number(process.env.CONVERT_MERGE_TIMEOUT_MS || 150 * 1000)
 };
 
 const jobs = new Map();          // id -> job
@@ -51,7 +58,7 @@ function publicView(j) {
     id: j.id, status: j.status, step: j.step, progress: j.progress, error: j.error || null,
     fileName: j.outName, sizeBytes: j.outSize || null, sizeHuman: j.outSize ? core.humanSize(j.outSize) : null,
     sourceBytes: j.srcSize || null, downloadedBytes: j.downloaded || 0,
-    resigned: j.resigned, notes: j.notes, splits: j.splits || null, hasObb: !!j.hasObb,
+    resigned: j.resigned, mergeMode: j.mergeMode || null, notes: j.notes, splits: j.splits || null, hasObb: !!j.hasObb,
     downloadUrl: j.status === 'done' ? `/api/convert/${j.id}/file` : null,
     createdAt: j.createdAt, finishedAt: j.finishedAt || null, expiresAt: j.expiresAt || null
   };
@@ -130,13 +137,33 @@ async function run(j) {
     if (!available()) throw fail(j, 'Conversion tools (Java / APKEditor) are not installed on this server.');
     j.step = `Merging ${apks.length} split APKs into one`; j.progress = 0.6;
     const merged = path.join(j.dir, 'merged.apk');
-    await runJava(j, ['-jar', CFG.apkEditor, 'm', '-i', src, '-o', merged, '-f', '-clean-meta', '-extractNativeLibs', 'true'], 'APKEditor merge');
-    if (!fs.existsSync(merged)) throw fail(j, 'APKEditor produced no output.');
+    let mode = 'full';
+    const bundleBytes = fs.statSync(src).size;
+    try {
+      if (bundleBytes > CFG.fullMergeMaxBytes) throw new Error(`bundle is ${core.humanSize(bundleBytes)} — too large for a full resource merge on this instance`);
+      await runJava(j, ['-jar', CFG.apkEditor, 'm', '-i', src, '-o', merged, '-f', '-clean-meta', '-extractNativeLibs', 'true'], 'APKEditor merge', CFG.xmx, CFG.mergeTimeoutMs);
+      if (!fs.existsSync(merged)) throw new Error('APKEditor produced no output.');
+    } catch (e) {
+      // Full resource merge needs more heap/CPU than the free instance has for big apps. Fall back to a streaming
+      // merge: base.apk + native libs from the ABI splits + manifest patched so a single APK installs.
+      if (!/OutOfMemory|heap|timed out|no output|too large/i.test(e.message)) throw e;
+      j.log('warn', 'convert: full merge skipped/failed, using light merge', { id: j.id, reason: e.message.slice(0, 200) });
+      j.status = 'running'; j.error = null; j.step = 'Merging base APK + native libraries (streaming)'; j.progress = 0.7;
+      const parts = [];
+      for (const a of apks) { const pth = path.join(j.dir, a); await extractZipEntry(src, a, pth); parts.push(pth); }
+      const basePath = parts.find(p => /(^|\/)base\.apk$/i.test(p)) || parts.sort((a, b) => fs.statSync(b).size - fs.statSync(a).size)[0];
+      const lm = await lightMerge(basePath, parts.filter(p => p !== basePath), merged);
+      mode = 'light'; j.lightMerge = lm;
+      for (const p of parts) { try { fs.unlinkSync(p); } catch { /* ignore */ } }
+    }
     j.step = 'Signing (v1+v2+v3) and zipaligning'; j.progress = 0.85;
-    await runJava(j, ['-jar', CFG.signer, '-a', merged, '--allowResign', '--overwrite'], 'uber-apk-signer');
+    await runJava(j, ['-jar', CFG.signer, '-a', merged, '--allowResign', '--overwrite'], 'uber-apk-signer', CFG.signerXmx);
     fs.renameSync(merged, out);
-    j.resigned = true;
-    j.notes = `Merged ${apks.length} split APKs (${splitList.filter(s => s !== 'base.apk').map(s => s.replace(/^config\.|\.apk$/g, '')).join(', ')}) into one universal APK and re-signed it with the tool's key. Installs as a fresh app; it will not update a copy installed from Google Play, and apps that verify their own signature may refuse to run.` + (j.hasObb ? ' OBB data file left out.' : '');
+    j.resigned = true; j.mergeMode = mode;
+    const splitNames = splitList.filter(s => s !== 'base.apk').map(s => s.replace(/^config\.|\.apk$/g, '')).join(', ');
+    j.notes = mode === 'full'
+      ? `Merged ${apks.length} split APKs (${splitNames}) into one universal APK and re-signed it with the tool's key. Installs as a fresh app; it will not update a copy installed from Google Play, and apps that verify their own signature may refuse to run.` + (j.hasObb ? ' OBB data file left out.' : '')
+      : `Built from base.apk + ${j.lightMerge.libs} native librar${j.lightMerge.libs === 1 ? 'y' : 'ies'} (splits: ${splitNames}); density/language resource splits were not merged, so the app uses its default artwork and language. Re-signed with the tool's key: installs as a fresh app, will not update a Play-installed copy, and apps that verify their own signature may refuse to run.` + (j.hasObb ? ' OBB data file left out.' : '');
   }
   const st = fs.statSync(out);
   const oh = Buffer.alloc(2); const ofd = fs.openSync(out, 'r'); fs.readSync(ofd, oh, 0, 2, 0); fs.closeSync(ofd);
@@ -148,11 +175,11 @@ async function run(j) {
 
 function fail(j, msg) { j.status = 'error'; j.error = msg; j.step = 'Failed'; j.log('warn', 'convert failed', { id: j.id, pkg: j.pkg, error: msg }); return new Error(msg); }
 
-function runJava(j, args, label) {
+function runJava(j, args, label, xmx, timeoutMs) {
   return new Promise((res, rej) => {
-    const p = spawn(CFG.javaBin, [`-Xmx${CFG.xmx}`, '-Xss512k', '-XX:+UseSerialGC', '-XX:MaxMetaspaceSize=64m', '-XX:TieredStopAtLevel=1', '-Djava.awt.headless=true', ...args], { cwd: j.dir, env: { ...process.env, JAVA_TOOL_OPTIONS: '' } });
+    const p = spawn(CFG.javaBin, [`-Xmx${xmx || CFG.xmx}`, '-Xss512k', '-XX:+UseSerialGC', '-XX:MaxMetaspaceSize=64m', '-XX:TieredStopAtLevel=1', '-Djava.awt.headless=true', ...args], { cwd: j.dir, env: { ...process.env, JAVA_TOOL_OPTIONS: '' } });
     let err = '', out = '';
-    const t = setTimeout(() => { p.kill('SIGKILL'); rej(fail(j, `${label} timed out.`)); }, CFG.stepTimeoutMs);
+    const t = setTimeout(() => { p.kill('SIGKILL'); rej(fail(j, `${label} timed out.`)); }, timeoutMs || CFG.stepTimeoutMs);
     p.stdout.on('data', d => { out += d; if (out.length > 20000) out = out.slice(-10000); });
     p.stderr.on('data', d => { err += d; if (err.length > 20000) err = err.slice(-10000); });
     p.on('error', e => { clearTimeout(t); rej(fail(j, `${label} could not start (${e.message}). Is Java installed?`)); });
