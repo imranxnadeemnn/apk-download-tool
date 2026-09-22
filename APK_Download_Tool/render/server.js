@@ -7,6 +7,7 @@
  *   GET  /api/resolve?input=    Play URL / market:// / package  ->  JSON result or structured error
  *   GET  /api/download?u=&name= Streams the APK from the mirror through this server (no size limit besides MAX_PROXY_BYTES)
  *   GET  /api/diagnose?pkg=     Raw HTTP status of each mirror endpoint from THIS server's IP (protect with DIAG_TOKEN)
+ *   GET  /api/convert?u=        Start / reuse an XAPK -> single-APK conversion job; /api/convert/:id status; /:id/file result
  *   GET  /api/notifications     In-app notification feed: recent resolutions, failures and mirror-health alerts
  *   GET  /healthz               Liveness
  *
@@ -21,6 +22,7 @@ const express = require('express');
 const path = require('path');
 const { Readable } = require('stream');
 const core = require('./lib/core');
+const convert = require('./lib/convert');
 const { CONFIG, ERR, ApkToolError, toErrorPayload, httpFetch, resolveApk, diagnoseProviders } = core;
 
 const app = express();
@@ -116,9 +118,9 @@ function rateLimit(req, res, next) {
 // ----------------------------------------------------------------------------
 app.use(express.static(path.join(__dirname, 'public'), { index: 'index.html', maxAge: '5m' }));
 
-app.get('/healthz', (req, res) => res.json({ ok: true, app: CONFIG.APP_NAME, providers: CONFIG.PROVIDER_ORDER, uptimeSec: Math.round(process.uptime()) }));
+app.get('/healthz', (req, res) => res.json({ ok: true, app: CONFIG.APP_NAME, providers: CONFIG.PROVIDER_ORDER, convert: convert.available(), uptimeSec: Math.round(process.uptime()) }));
 
-app.get('/api/config', (req, res) => res.json({ ok: true, appName: CONFIG.APP_NAME, providers: CONFIG.PROVIDER_ORDER, defaultRegion: CONFIG.PLAY_DEFAULT_REGION, maxProxyBytes: CONFIG.MAX_PROXY_BYTES }));
+app.get('/api/config', (req, res) => res.json({ ok: true, appName: CONFIG.APP_NAME, providers: CONFIG.PROVIDER_ORDER, defaultRegion: CONFIG.PLAY_DEFAULT_REGION, maxProxyBytes: CONFIG.MAX_PROXY_BYTES, convertAvailable: convert.available() }));
 
 app.get('/api/resolve', rateLimit, async (req, res) => {
   const input = String(req.query.input || req.query.url || req.query.id || '');
@@ -188,6 +190,48 @@ app.get('/api/download', rateLimit, async (req, res) => {
   req.on('close', () => body.destroy());
   body.on('end', () => log('info', 'proxy done', { u: target.hostname, bytes: sent, ip: req.ip }));
   body.pipe(res);
+});
+
+/**
+ * XAPK -> single APK conversion (see lib/convert.js).
+ *   GET /api/convert?u=<xapk url>&name=<file.apk>&pkg=<package>[&ref=]  -> creates/reuses a job, returns its status
+ *   GET /api/convert/:id                                                  -> job status (poll every ~2 s)
+ *   GET /api/convert/:id/file                                             -> the finished .apk
+ */
+app.get('/api/convert', rateLimit, (req, res) => {
+  const u = String(req.query.u || ''), name = String(req.query.name || 'app.apk'), ref = String(req.query.ref || ''), pkg = String(req.query.pkg || '');
+  let target;
+  try { target = new URL(u); } catch { return res.status(400).json(toErrorPayload(new ApkToolError(ERR.INVALID_URL, 'Invalid bundle URL.'))); }
+  if (target.protocol !== 'https:' || !PROXY_HOSTS.test(target.hostname)) {
+    return res.status(400).json(toErrorPayload(new ApkToolError(ERR.INVALID_URL, `Refusing to fetch from ${target.hostname}.`, 'Only known APK mirrors can be converted.')));
+  }
+  if (!convert.available()) {
+    return res.status(503).json(toErrorPayload(new ApkToolError('CONVERT_UNAVAILABLE', 'XAPK conversion is not available on this server (Java tools missing).', 'Download the XAPK and install it with the APKPure app or SAI instead.')));
+  }
+  if (req.query.check) {                       // status-only: never starts a job
+    const existing = convert.find(u);
+    return res.json({ ok: true, job: existing ? convert.publicView(existing) : null });
+  }
+  const job = convert.start(u, { name, ref, pkg, log, onDone: j => {
+    if (j.status === 'done') pushEvent('success', `${j.pkg || j.outName} → single APK (${j.resigned ? 'merged + re-signed' : 'extracted'})`, `${core.humanSize(j.outSize)} from a ${j.splits ? j.splits.length : '?'}-part bundle`, { package: j.pkg || null, provider: 'convert', sizeBytes: j.outSize });
+    else pushEvent('error', `XAPK conversion failed: ${j.pkg || j.outName}`, j.error || 'unknown error', { package: j.pkg || null, code: 'CONVERT_FAILED' });
+  } });
+  res.status(job.status === 'done' ? 200 : 202).json({ ok: true, job: convert.publicView(job) });
+});
+app.get('/api/convert/:id', (req, res) => {
+  const job = convert.get(String(req.params.id));
+  res.setHeader('Cache-Control', 'no-store');
+  if (!job) return res.status(404).json({ ok: false, error: { code: 'JOB_NOT_FOUND', message: 'No such conversion job (it may have expired — run the lookup again).' } });
+  res.json({ ok: true, job: convert.publicView(job) });
+});
+app.get('/api/convert/:id/file', (req, res) => {
+  const job = convert.get(String(req.params.id));
+  if (!job || job.status !== 'done' || !job.outPath) return res.status(404).json({ ok: false, error: { code: 'JOB_NOT_READY', message: 'The converted APK is not ready or has expired.' } });
+  const name = job.outName.replace(/\.xapk$/i, '.apk').replace(/(\.apk)?$/i, '.apk');
+  res.setHeader('Content-Type', 'application/vnd.android.package-archive');
+  res.setHeader('Content-Disposition', `attachment; filename="${name.replace(/"/g, '')}"; filename*=UTF-8''${encodeURIComponent(name)}`);
+  res.setHeader('Cache-Control', 'no-store');
+  res.sendFile(job.outPath, err => { if (err && !res.headersSent) res.status(500).end(); });
 });
 
 /** Notification feed for the UI. ?since=<id> returns only newer events; ?limit=N caps the list (default 50). */
