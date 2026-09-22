@@ -70,6 +70,37 @@
     .errbox .msg { font-weight: 600; margin: 4px 0; }
     .errbox .hint { color: var(--ink); opacity: .85; margin: 0; }
 
+    /* notification bell + panel */
+    .hgrow { flex: 1; min-width: 0; }
+    .bell { position: relative; background: var(--card); color: var(--ink); border: 1px solid var(--line); border-radius: 12px; width: 40px; height: 40px; padding: 0; display: grid; place-items: center; }
+    .bell:hover { border-color: var(--accent); }
+    .bell.has-alert { color: var(--err); border-color: rgba(209,67,67,.5); }
+    .bell-badge { position: absolute; top: -6px; right: -6px; min-width: 18px; height: 18px; padding: 0 5px; border-radius: 999px; background: var(--err); color: #fff; font-size: 11px; font-weight: 700; display: grid; place-items: center; }
+    .bell-badge.info { background: var(--accent); }
+    .notif { background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); box-shadow: var(--shadow); padding: 14px 16px; margin-bottom: 16px; }
+    .notif-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; flex-wrap: wrap; }
+    .notif-title { font-weight: 700; }
+    .notif-sub { font-size: 12.5px; color: var(--muted); }
+    .notif-actions { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+    .notif-filter { font-size: 12.5px; color: var(--muted); display: flex; gap: 6px; align-items: center; }
+    button.small { padding: 6px 10px; font-size: 12.5px; }
+    .notif-health { display: flex; gap: 8px; flex-wrap: wrap; margin: 10px 0 4px; }
+    .pill { font-size: 11.5px; font-weight: 600; padding: 3px 9px; border-radius: 999px; background: rgba(30,158,90,.12); color: var(--ok); }
+    .pill.bad { background: rgba(209,67,67,.12); color: var(--err); }
+    .pill.warn { background: rgba(201,138,0,.14); color: var(--warn); }
+    .pill.muted { background: var(--bg); color: var(--muted); font-weight: 500; }
+    .notif-list { list-style: none; margin: 8px 0 0; padding: 0; max-height: 360px; overflow: auto; }
+    .notif-list li { display: grid; grid-template-columns: 10px 1fr auto; gap: 10px; align-items: start; padding: 9px 4px; border-top: 1px solid var(--line); font-size: 13px; }
+    .notif-list li.unread { background: rgba(47,111,237,.05); }
+    .notif-list .dot { width: 10px; height: 10px; border-radius: 50%; margin-top: 5px; background: var(--line); }
+    .notif-list .k-success .dot { background: var(--ok); } .notif-list .k-failure .dot { background: var(--warn); } .notif-list .k-error .dot, .notif-list .k-alert .dot { background: var(--err); }
+    .notif-list .nt { font-weight: 600; } .notif-list .nd { color: var(--muted); font-size: 12.5px; margin-top: 2px; word-break: break-word; }
+    .notif-list .nd code { font-size: 11.5px; }
+    .notif-list time { color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+    .notif-list .rerun { display: inline-block; margin-top: 4px; font-size: 12px; color: var(--accent); cursor: pointer; text-decoration: underline; }
+    .notif-empty { color: var(--muted); font-size: 13px; padding: 12px 4px; }
+    .notif-foot { font-size: 11.5px; color: var(--muted); margin-top: 8px; }
+
     /* browser-side fallback links */
     .fallback { display: none; margin-top: 14px; padding-top: 12px; border-top: 1px dashed rgba(209,67,67,.35); }
     .fallback.show { display: block; }
@@ -101,11 +132,32 @@
 <div class="wrap">
   <header>
     <div class="logo">A</div>
-    <div>
+    <div class="hgrow">
       <h1>APK Download Tool</h1>
       <p>Paste a Google Play link → get the APK from a free public mirror.</p>
     </div>
+    <button id="bell" class="bell" type="button" aria-label="Notifications" title="Activity &amp; alerts">
+      <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8a6 6 0 0 0-12 0c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.7 21a2 2 0 0 1-3.4 0"/></svg>
+      <span id="bellBadge" class="bell-badge" hidden>0</span>
+    </button>
   </header>
+
+  <section id="notifPanel" class="notif" hidden aria-live="polite">
+    <div class="notif-head">
+      <div>
+        <div class="notif-title">Activity &amp; alerts</div>
+        <div class="notif-sub" id="notifSummary">Loading…</div>
+      </div>
+      <div class="notif-actions">
+        <label class="notif-filter"><input type="checkbox" id="notifAlertsOnly"> alerts &amp; failures only</label>
+        <button id="notifMarkRead" class="secondary small" type="button">Mark all read</button>
+        <button id="notifClose" class="secondary small" type="button" aria-label="Close">✕</button>
+      </div>
+    </div>
+    <div id="notifHealth" class="notif-health"></div>
+    <ul id="notifList" class="notif-list"></ul>
+    <div class="notif-foot">Shared, anonymous feed of what this server did in the last few hours — successes, apps it could not find, and mirrors that are blocking it. Refreshes every 15 s.</div>
+  </section>
 
   <div class="card">
     <form id="form" autocomplete="off" novalidate>
@@ -331,7 +383,7 @@
         if (!r || typeof r !== 'object') { r = { ok: false, error: { code: 'BAD_RESPONSE', message: 'Empty response from server.', hint: 'Reload the page and try again.' } }; }
         if (r.ok) { stopProgress(true); showResult(r); }
         else { stopProgress(false, failedStepFor(r.error.code)); showError(r.error); }
-        done();
+        done(); setTimeout(pollNotif, 400);
       })
       .catch(function (e) {
         clearTimeout(timeout); clearTimeout(hardStop);
@@ -356,6 +408,65 @@
     if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(url).then(function () { toast('ok', 'Link copied'); }, fallback);
     else fallback();
   });
+
+  // ---------- notification center (polls /api/notifications) ----------
+  var notif = { events: [], latestId: 0, lastSeen: 0, open: false, alertsOnly: false, summary: null, timer: null };
+  try { notif.lastSeen = Number(localStorage.getItem('apk.notif.lastSeen') || 0); } catch (_) {}
+  var bell = $('bell'), badge = $('bellBadge'), panel = $('notifPanel');
+
+  function timeAgo(iso) {
+    var s = Math.max(0, Math.round((Date.now() - Date.parse(iso)) / 1000));
+    if (s < 60) return s + 's ago'; if (s < 3600) return Math.round(s / 60) + 'm ago'; if (s < 86400) return Math.round(s / 3600) + 'h ago';
+    return new Date(iso).toLocaleString();
+  }
+  function renderNotif() {
+    var unread = notif.events.filter(function (e) { return e.id > notif.lastSeen; });
+    var unreadAlerts = unread.filter(function (e) { return e.kind === 'alert' || e.kind === 'error'; });
+    badge.hidden = unread.length === 0; badge.textContent = unread.length > 99 ? '99+' : String(unread.length);
+    badge.classList.toggle('info', unreadAlerts.length === 0);
+    bell.classList.toggle('has-alert', unreadAlerts.length > 0);
+    if (!notif.open) return;
+    var sm = notif.summary || {};
+    $('notifSummary').textContent = sm.windowMin ? ('Last ' + sm.windowMin + ' min: ' + (sm.success || 0) + ' resolved · ' + (sm.failure || 0) + ' not found · ' + (sm.error || 0) + ' errors · ' + (sm.alerts || 0) + ' alerts') : 'No activity recorded yet on this server instance.';
+    var health = $('notifHealth'); health.innerHTML = '';
+    (['APKPure', 'Aptoide', 'F-Droid', 'APKCombo']).forEach(function (p) {
+      var blocked = (sm.blockedProviders || []).some(function (b) { return b.toLowerCase() === p.toLowerCase(); });
+      var sp = document.createElement('span'); sp.className = 'pill ' + (blocked ? 'bad' : 'muted'); sp.textContent = p + (blocked ? ' · blocking' : ' · ok'); health.appendChild(sp);
+    });
+    var list = $('notifList'); list.innerHTML = '';
+    var shown = notif.events.filter(function (e) { return !notif.alertsOnly || e.kind !== 'success'; });
+    if (!shown.length) { var em = document.createElement('div'); em.className = 'notif-empty'; em.textContent = 'Nothing here yet. Resolve an app and it will show up.'; list.appendChild(em); return; }
+    shown.forEach(function (e) {
+      var li = document.createElement('li'); li.className = 'k-' + e.kind + (e.id > notif.lastSeen ? ' unread' : '');
+      var dot = document.createElement('span'); dot.className = 'dot';
+      var body = document.createElement('div');
+      var t = document.createElement('div'); t.className = 'nt'; t.textContent = e.title; body.appendChild(t);
+      if (e.detail || e.code) { var d = document.createElement('div'); d.className = 'nd'; d.textContent = e.detail || ''; if (e.code) { var c = document.createElement('code'); c.textContent = ' ' + e.code; d.appendChild(c); } body.appendChild(d); }
+      if (e.package) { var r = document.createElement('span'); r.className = 'rerun'; r.textContent = 'Look up ' + e.package; r.addEventListener('click', function () { input.value = e.package; input.dispatchEvent(new Event('input')); form.dispatchEvent(new Event('submit', { cancelable: true })); window.scrollTo({ top: 0, behavior: 'smooth' }); }); body.appendChild(r); }
+      var tm = document.createElement('time'); tm.dateTime = e.t; tm.title = new Date(e.t).toLocaleString(); tm.textContent = timeAgo(e.t);
+      li.appendChild(dot); li.appendChild(body); li.appendChild(tm); list.appendChild(li);
+    });
+  }
+  function pollNotif() {
+    fetch('/api/notifications?limit=100', { headers: { 'Accept': 'application/json' } })
+      .then(function (r) { return r.json(); })
+      .then(function (j) {
+        if (!j || !j.ok) return;
+        var hadAlertIds = {}; notif.events.forEach(function (e) { hadAlertIds[e.id] = true; });
+        notif.events = j.events || []; notif.latestId = j.latestId || 0; notif.summary = j.summary || null;
+        // toast newly-arrived alerts (server-wide, not just this tab's own requests)
+        notif.events.forEach(function (e) { if (e.kind === 'alert' && !hadAlertIds[e.id] && e.id > notif.lastSeen && Object.keys(hadAlertIds).length) toast('warn', e.title, e.detail, 8000); });
+        renderNotif();
+      })
+      .catch(function () { /* server asleep or offline — the bell simply stays as is */ });
+  }
+  function setPanel(open) { notif.open = open; panel.hidden = !open; bell.setAttribute('aria-expanded', String(open)); if (open) renderNotif(); }
+  bell.addEventListener('click', function () { setPanel(!notif.open); });
+  $('notifClose').addEventListener('click', function () { setPanel(false); });
+  $('notifMarkRead').addEventListener('click', function () { notif.lastSeen = notif.latestId; try { localStorage.setItem('apk.notif.lastSeen', String(notif.lastSeen)); } catch (_) {} renderNotif(); });
+  $('notifAlertsOnly').addEventListener('change', function (ev) { notif.alertsOnly = ev.target.checked; renderNotif(); });
+  pollNotif(); notif.timer = setInterval(pollNotif, 15000);
+  document.addEventListener('visibilitychange', function () { if (!document.hidden) pollNotif(); });
 
   // Surface uncaught client errors instead of failing silently.
   window.addEventListener('error', function (ev) { toast('err', 'Page error', ev.message || 'Unexpected error', 6000); });
