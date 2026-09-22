@@ -21,7 +21,8 @@ services:
         value: "60"
       - key: DIAG_TOKEN
         generateValue: true
-      # Optional notifications — set in the Render dashboard:
-      # - key: NOTIFY_WEBHOOK_URL   (Slack / Teams incoming webhook)
-      # - key: SMTP_URL             (smtps://user:app-password@smtp.gmail.com)
-      # - key: NOTIFY_EMAIL_TO
+      # In-app notifications (bell icon in the UI). No Slack/Teams/e-mail.
+      - key: NOTIFY_ALERT_THRESHOLD
+        value: "3"
+      - key: NOTIFY_ALERT_WINDOW_SEC
+        value: "600"
